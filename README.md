@@ -111,12 +111,17 @@ even halts, let alone halts within budget. On Xahau you can.
 Every Prover verdict was confirmed on **Xahau testnet** — install the hook, send a
 10 XAH payment against a 5 XAH limit, read the ledger's `engine_result`:
 
-| hook | Prover | ledger |
-|---|---|---|
-| correct | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) ✓ |
-| inverted-compare bug | COUNTEREXAMPLE | **`tesSUCCESS`** (the ledger really does accept it) ✓ |
+| hook | invariant | Prover | ledger |
+|---|---|---|---|
+| correct | spend-limit | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) ✓ |
+| inverted-compare bug | spend-limit | COUNTEREXAMPLE | **`tesSUCCESS`** (the ledger really does accept it) ✓ |
+| `termination_bug`, drops%256=64 | guard-termination | COUNTEREXAMPLE | `tecHOOK_REJECTED`, `HookReturnCode=0x80…10` (guard kill) ✓ |
+| `termination_bug`, drops%256=4 | guard-termination | within budget → accept | **`tesSUCCESS`** ✓ |
 
-The math and the chain agree.
+The math and the chain agree — on all three invariants. The guard-termination
+counterexample was confirmed live: the prover's predicted attack amount (last byte
+> 8) really does trigger a `GUARD_VIOLATION` on testnet, while an in-budget amount
+goes through. The hook has no `rollback()`, so the kill can only be the guard.
 
 ## How it works
 
