@@ -176,7 +176,20 @@ class Engine:
             elif fid == SF_DESTINATION:
                 bs = self.fresh_bytes("dest", 20); self.store_bytes(p, wptr, bs); st.append(z3.BitVecVal(20, 64))
             else:
-                st.append(z3.BitVecVal(-29 & ((1 << 64) - 1), 64))  # DOESNT_EXIST
+                # SOUND generalization (was: always-absent -29). Any other otxn field
+                # is modeled with SYMBOLIC content AND a symbolic return length, so a
+                # hook gating accept/rollback on this field's presence or value is
+                # actually explored. The old always-absent could SKIP a real accepting
+                # path (field present) -> a latent vacuous proof. Mirrors hook_param.
+                n = max(1, min(wlen, 256))
+                key = f"otxn_field:{fid:x}"
+                bs = self.inputs.get(key)
+                if bs is None or len(bs) < n:
+                    bs = self.fresh_bytes(key, n)
+                self.store_bytes(p, wptr, bs[:n])
+                ret = z3.BitVec(f"otxn_field_ret:{fid:x}", 64)
+                self.inputs[f"otxn_field_ret:{fid:x}"] = ret  # expose for invariant scoping
+                st.append(ret)
             return
         if name == "hook_param":
             klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
@@ -425,12 +438,28 @@ class Engine:
                 return [(("return",), p)]
             if op in ("unreachable", "nop"):
                 return [] if op == "unreachable" else [(None, p)]
-            # ---- opcodes the decoder accepts but the interpreter cannot model ----
-            # br_table (clang's `switch`) and call_indirect have no sound execution
-            # here. Record the op so the verdict is forced to INCONCLUSIVE, and END
-            # this path cleanly instead of falling through to a misleading stack
-            # underflow / ValueError. SOUND: never PROVEN on an unmodeled op.
-            if op in ("br_table", "call_indirect"):
+            # br_table (clang's `switch`): pop the index and fork to each labelled
+            # target under `idx == k`, plus the default under `idx >= n` (unsigned).
+            # The forks are exhaustive (0..n-1 and >=n cover all u32) and mutually
+            # exclusive, so no reachable target is dropped — SOUND: a real accepting
+            # case can't be skipped, and an infeasible case is pruned by `feasible`.
+            if op == "br_table":
+                tgts, deflt = ins.imm
+                idx = p.stack.pop()
+                w = idx.size()
+                out = []
+                for k, depth in enumerate(tgts):
+                    pk = p.clone(); pk.cons.append(idx == z3.BitVecVal(k, w))
+                    if feasible(pk.cons):
+                        out.append((("br", depth), pk))
+                pd = p.clone(); pd.cons.append(z3.UGE(idx, z3.BitVecVal(len(tgts), w)))
+                if feasible(pd.cons):
+                    out.append((("br", deflt), pd))
+                return out
+            # call_indirect has no sound execution model here (function-table dispatch).
+            # Record it so the verdict is forced to INCONCLUSIVE, and END this path
+            # cleanly instead of a misleading stack underflow. SOUND: never PROVEN.
+            if op == "call_indirect":
                 self.unsupported.add(op)
                 return []
             if op == "call":

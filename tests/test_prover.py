@@ -257,20 +257,258 @@ def _brtable_module():
     return _module(types, imports, export_fn_idx=1, data_off=1024, data_bytes=b"ok\x00", body=body)
 
 
-def test_brtable_is_inconclusive_not_crash():
-    # FINDING 4: br_table must record an unsupported op -> INCONCLUSIVE (exit 3),
-    # not a confusing RuntimeError, and never PROVEN.
+def test_brtable_is_executed_soundly():
+    # br_table (clang's `switch`) is now EXECUTED — the engine forks over each
+    # labelled target under `idx == k` plus the default under `idx >= n`. The fixture
+    # switches (index 0 -> target 0 -> exits the block -> accept), so: br_table must
+    # NOT be flagged unsupported, the path must reach accept, and the verdict is a
+    # real PROVEN (no spend), never an unsupported-INCONCLUSIVE.
     wasm = _brtable_module()
     path = os.path.join(ROOT, "tests", "_tmp_brtable.wasm")
     open(path, "wb").write(wasm)
     try:
         e = Engine(wasm)
         e.run()                                          # must not raise
-        assert "br_table" in e.unsupported, "br_table not flagged unsupported"
+        assert "br_table" not in e.unsupported, "br_table should now be executed, not unsupported"
+        assert len(e.accepts) == 1, "br_table switch should reach the accept path"
         rc = prove_termination.main(path)
     finally:
         os.remove(path)
-    assert rc == 3, f"br_table must yield INCONCLUSIVE (3), got {rc}"
+    assert rc == 0, f"br_table hook should now PROVE (0), got {rc}"
+
+
+# --- ADVERSARIAL br_table soundness (switch cannot drop an unsafe case) ---------
+
+def _switch_emit_module(case0, case1, default):
+    """3-way switch over arg0 (i32 index):
+        idx==0 -> case0 ; idx==1 -> case1 ; idx>=2 -> default.
+    Each `case` is raw bytes ending in its own accept (so no fallthrough); the
+    default falls through to a final accept. Each case may call emit() zero or more
+    times — the nospend invariant (<=1 emit per accept) is the probe: if br_table
+    silently dropped a case, an unsafe (double-emit) case would not appear and the
+    hook would FALSELY prove. emit=0, accept=1 in the import table."""
+    emit_ft = _ftype([I32, I32, I32, I32], [I64])
+    accept_ft = _ftype([I32, I32, I32], [I64])
+    types = [_ftype([I32], [I64]), emit_ft, accept_ft]
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "emit", 1), _imp("env", "accept", 2)]   # emit=0, accept=1
+
+    blk = lambda inner: bytes([0x02, 0x40]) + inner + bytes([0x0B])   # block void
+    brtab = lambda tgts, d: (bytes([0x0E]) + _uleb(len(tgts)) +
+                             b"".join(_uleb(t) for t in tgts) + _uleb(d))
+    lget0 = bytes([0x20]) + _uleb(0)                                  # local.get 0 (index)
+    RET = bytes([0x0F])
+    # nested blocks: depth 0 (innermost) -> case0, depth 1 -> case1, depth 2 -> default
+    inner = lget0 + brtab([0, 1], 2)
+    L0 = blk(inner)
+    L1 = blk(L0 + case0 + RET)
+    L2 = blk(L1 + case1 + RET)
+    body = L2 + default + _i64c(0) + bytes([0x0B])
+    return _module(types, imports, export_fn_idx=2, data_off=1024, data_bytes=b"ok\x00", body=body)
+
+
+def _emit_call():    # emit(0,0,0,0)
+    return _i32c(0) + _i32c(0) + _i32c(0) + _i32c(0) + bytes([0x10]) + _uleb(0) + bytes([0x1A])
+
+
+def _accept_call():  # accept(0,0,0)
+    return _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(1) + bytes([0x1A])
+
+
+def _run_nospend(wasm):
+    path = os.path.join(ROOT, "tests", "_tmp_switch.wasm")
+    open(path, "wb").write(wasm)
+    try:
+        return prove_nospend.main(path)
+    finally:
+        os.remove(path)
+
+
+def test_brtable_fork_is_exhaustive_and_exclusive():
+    # ENGINE-LEVEL: the br_table fork must cover EVERY u32 index (0..n-1 and >=n)
+    # with mutually-exclusive constraints — no reachable case silently dropped.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    idx = z3.BitVec("idx32", 32)
+    p = Path(); p.stack = [idx]
+    out = e._exec(Instr("br_table", imm=([0, 1, 2], 3)), p)
+    assert len(out) == 4, "expected 3 labelled + 1 default fork"
+    union = z3.Or(*[z3.And(*pp.cons) for _, pp in out])
+    s = z3.Solver(); s.add(z3.Not(union))
+    assert s.check() == z3.unsat, "br_table fork leaves some u32 index uncovered (case could be dropped)"
+    import itertools
+    for (_, p1), (_, p2) in itertools.combinations(out, 2):
+        ss = z3.Solver(); ss.add(*p1.cons, *p2.cons)
+        assert ss.check() == z3.unsat, "br_table branches overlap (not mutually exclusive)"
+
+
+def test_brtable_all_cases_safe_is_proven():
+    # All three switch cases emit exactly once -> no double-spend -> real PROVEN(0).
+    wasm = _switch_emit_module(
+        _emit_call() + _accept_call(),
+        _emit_call() + _accept_call(),
+        _emit_call() + _accept_call())
+    e = Engine(wasm); e.run()
+    assert len(e.accepts) == 3, "all 3 switch branches (incl. default) must be explored"
+    assert sorted({c for _, _, c in e.emits_on_accept}) == [1]
+    assert _run_nospend(wasm) == 0, "all-safe switch must PROVE"
+
+
+def test_brtable_one_unsafe_labelled_case_is_caught():
+    # DECISIVE: exactly ONE labelled case (idx==1) double-emits. If br_table dropped
+    # that case it would falsely PROVE; the prover must report CEX(2).
+    wasm = _switch_emit_module(
+        _emit_call() + _accept_call(),
+        _emit_call() + _emit_call() + _accept_call(),     # UNSAFE
+        _emit_call() + _accept_call())
+    e = Engine(wasm); e.run()
+    assert 2 in {c for _, _, c in e.emits_on_accept}, "the unsafe case path was dropped"
+    assert _run_nospend(wasm) == 2, "unsafe labelled switch case must be a COUNTEREXAMPLE, not PROVEN"
+
+
+def test_brtable_unsafe_default_case_is_caught():
+    # The DEFAULT branch (idx>=2) must also be explored: only the default double-emits.
+    wasm = _switch_emit_module(
+        _emit_call() + _accept_call(),
+        _emit_call() + _accept_call(),
+        _emit_call() + _emit_call() + _accept_call())     # UNSAFE default
+    e = Engine(wasm); e.run()
+    assert 2 in {c for _, _, c in e.emits_on_accept}, "the default case was not explored"
+    assert _run_nospend(wasm) == 2, "unsafe br_table DEFAULT must be a COUNTEREXAMPLE, not PROVEN"
+
+
+def test_brtable_targeting_loop_backedge_propagates_depth():
+    # NESTED: a br_table inside a block inside a loop. One target depth reaches the
+    # loop back-edge (iterate), the other exits the block. With no _g guard the
+    # back-edge iterates to the unroll bound -> hit_bound True (sound: INCONCLUSIVE,
+    # never PROVEN). Confirms br_table's ('br', depth) decrements correctly through
+    # _block_like AND _loop.
+    types = [_ftype([I32], [I64]), _ftype([I32, I32, I32], [I64])]
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "accept", 1)]
+    loop = lambda inner: bytes([0x03, 0x40]) + inner + bytes([0x0B])
+    blk = lambda inner: bytes([0x02, 0x40]) + inner + bytes([0x0B])
+    brtab = lambda tgts, d: (bytes([0x0E]) + _uleb(len(tgts)) +
+                             b"".join(_uleb(t) for t in tgts) + _uleb(d))
+    lget0 = bytes([0x20]) + _uleb(0)
+    # br_table [1,0] default 0: idx==0 -> depth1 -> loop back-edge; idx>=1 -> depth0 -> exit block
+    B = blk(lget0 + brtab([1, 0], 0))
+    L = loop(B)
+    accept = _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(0) + bytes([0x1A])
+    body = L + accept + _i64c(0) + bytes([0x0B])
+    wasm = _module(types, imports, export_fn_idx=1, data_off=1024, data_bytes=b"ok\x00", body=body)
+    e = Engine(wasm); e.run()
+    assert e.hit_bound is True, "br_table back-edge target did not iterate the loop (depth misrouted)"
+    assert "br_table" not in e.unsupported
+
+
+# --- ADVERSARIAL symbolic otxn_field soundness (no skipped accept path) ----------
+
+def _field_gated_module(accept_body, fid=0x50001):
+    """Hook that gates accept on an UNMODELED otxn field's return:
+        ret = otxn_field(buf, 8, fid);  if (ret == 8) { accept_body } else rollback
+    Under the OLD always-absent (-29) modeling, ret==8 was unsat and the accept
+    branch was pruned -> vacuous proof. With a SYMBOLIC return the accept path is
+    explored. `accept_body` is raw bytes ending in accept().
+    Imports: otxn_field=0, emit=1, accept=2, rollback=3."""
+    otxn_ft = _ftype([I32, I32, I32], [I64])
+    emit_ft = _ftype([I32, I32, I32, I32], [I64])
+    accept_ft = _ftype([I32, I32, I32], [I64])
+    types = [_ftype([I32], [I64]), otxn_ft, emit_ft, accept_ft]
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "otxn_field", 1), _imp("env", "emit", 2),
+               _imp("env", "accept", 3), _imp("env", "rollback", 3)]
+    rollback_call = _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(3) + bytes([0x1A])
+    iff = lambda thenb, elseb: bytes([0x04, 0x40]) + thenb + bytes([0x05]) + elseb + bytes([0x0B])
+    # push wptr=1024, wlen=8, fid ; call otxn_field -> ret(i64) ; i64.const 8 ; i64.eq -> i32 ; if
+    call = _i32c(1024) + _i32c(8) + _i32c(fid) + bytes([0x10]) + _uleb(0)
+    cond = _i64c(8) + bytes([0x51])                                   # i64.eq
+    body = call + cond + iff(accept_body, rollback_call) + _i64c(0) + bytes([0x0B])
+    # 4 function imports -> local hook is function index 4
+    return _module(types, imports, export_fn_idx=4, data_off=1024, data_bytes=bytes(64), body=body)
+
+
+def _emit_call_idx1():   # emit(0,0,0,0) with emit at import index 1
+    return _i32c(0) + _i32c(0) + _i32c(0) + _i32c(0) + bytes([0x10]) + _uleb(1) + bytes([0x1A])
+
+
+def _accept_call_idx2():
+    return _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(2) + bytes([0x1A])
+
+
+def test_symbolic_field_accept_path_is_explored():
+    # KEY soundness point: an accept gated on an unmodeled field MUST be reachable
+    # now (previously always-absent forced rollback -> vacuous proof).
+    wasm = _field_gated_module(_accept_call_idx2())
+    e = Engine(wasm); e.run()
+    assert len(e.accepts) >= 1, "field-gated accept path was skipped (vacuous proof returned)"
+    assert any(k.startswith("otxn_field_ret") for k in e.inputs), "symbolic return length not exposed"
+
+
+def test_symbolic_field_unsafe_accept_is_caught():
+    # DECISIVE anti-vacuous: the field-gated accept path double-emits. Old code would
+    # falsely PROVE (0 accepting paths); the prover must now report CEX(2).
+    wasm = _field_gated_module(_emit_call_idx1() + _emit_call_idx1() + _accept_call_idx2())
+    path = os.path.join(ROOT, "tests", "_tmp_field.wasm")
+    open(path, "wb").write(wasm)
+    try:
+        rc = prove_nospend.main(path)
+    finally:
+        os.remove(path)
+    assert rc == 2, f"unsafe field-gated accept must be a COUNTEREXAMPLE, got {rc} (vacuous PROVEN if 0)"
+
+
+def test_symbolic_field_content_is_not_concretized():
+    # Symbolic field CONTENT must stay symbolic: an accept gated on byte0 == 0x42 is
+    # feasible (not forced false), and the rollback branch also exists.
+    iff = lambda thenb, elseb: bytes([0x04, 0x40]) + thenb + bytes([0x05]) + elseb + bytes([0x0B])
+    otxn_ft = _ftype([I32, I32, I32], [I64]); accept_ft = _ftype([I32, I32, I32], [I64])
+    types = [_ftype([I32], [I64]), otxn_ft, accept_ft]
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "otxn_field", 1), _imp("env", "accept", 2), _imp("env", "rollback", 2)]
+    accept_call = _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(1) + bytes([0x1A])
+    rollback_call = _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(2) + bytes([0x1A])
+    body = (_i32c(1024) + _i32c(8) + _i32c(0x50001) + bytes([0x10]) + _uleb(0) + bytes([0x1A])  # call, drop ret
+            + _i32c(1024) + bytes([0x2D]) + _uleb(0) + _uleb(0)                                 # i32.load8_u [1024]
+            + _i32c(0x42) + bytes([0x46])                                                       # const 0x42; i32.eq
+            + iff(accept_call, rollback_call) + _i64c(0) + bytes([0x0B]))
+    wasm = _module(types, imports, export_fn_idx=3, data_off=1024, data_bytes=bytes(64), body=body)
+    e = Engine(wasm); e.run()
+    assert len(e.accepts) == 1 and len(e.rollbacks) == 1, "content-gated branches not both explored"
+    s = z3.Solver(); s.add(*e.accepts[0][1])
+    assert s.check() == z3.sat, "symbolic content accept wrongly concretized to infeasible"
+
+
+def test_symbolic_field_retlen_into_memidx_fails_loud():
+    # (c) the symbolic return length used as a memory ADDRESS must raise conc()
+    # RuntimeError (fail loud -> exit 1), never silently flow on to a PROVEN.
+    otxn_ft = _ftype([I32, I32, I32], [I64]); accept_ft = _ftype([I32, I32, I32], [I64])
+    types = [_ftype([I32], [I64]), otxn_ft, accept_ft]
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "otxn_field", 1), _imp("env", "accept", 2)]
+    accept_call = _i32c(0) + _i32c(0) + _i64c(0) + bytes([0x10]) + _uleb(1) + bytes([0x1A])
+    body = (_i32c(1024) + _i32c(8) + _i32c(0x50001) + bytes([0x10]) + _uleb(0)  # ret(i64) symbolic
+            + bytes([0xA7])                                                     # i32.wrap_i64
+            + bytes([0x28]) + _uleb(2) + _uleb(0)                              # i32.load (conc(symbolic addr)!)
+            + bytes([0x1A]) + accept_call + _i64c(0) + bytes([0x0B]))
+    wasm = _module(types, imports, export_fn_idx=2, data_off=1024, data_bytes=bytes(64), body=body)
+    e = Engine(wasm)
+    raised = False
+    try:
+        e.run()
+    except RuntimeError:
+        raised = True
+    assert raised, "symbolic return length into a memory index must fail loud (conc RuntimeError)"
+    assert not e.accepts, "must not reach an accept with a symbolic memory index"
 
 
 def test_multivalue_blocktype_fails_loud():

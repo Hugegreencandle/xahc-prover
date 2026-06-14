@@ -6,12 +6,14 @@ invariant — over **every input in the modeled scope**, not just the ones you t
 that scope the verdict is **INCONCLUSIVE**, never a false PROVEN (it *fails closed*).
 
 **Scope of a PROVEN verdict (read this first).** "For all inputs" is precise but
-*bounded*. A PROVEN result holds for: native single-Payment hooks; the otxn fields
-the engine models — **sfAmount, sfAccount, sfDestination** (every other field is
-treated as absent); loops within their `_g` guard unroll bound; and the modeled
-subset of WASM. It does **not** yet cover `br_table` (clang `switch`),
-`call_indirect`, or IOU/XFL amounts — those force INCONCLUSIVE. Within that scope
-the "for all inputs" claim is real; outside it the prover refuses to certify.
+*bounded*. A PROVEN result holds for: native single-Payment hooks; **every otxn
+field** (sfAmount/sfAccount/sfDestination have exact native models; any other field
+is read as fully symbolic content + a symbolic present/absent length, so a hook
+gating on it is genuinely explored — never skipped); `switch`/`br_table` (forked
+over all targets); loops within their `_g` guard unroll bound; and the modeled
+subset of WASM. It does **not** yet cover `call_indirect` or IOU/XFL amounts —
+those force INCONCLUSIVE. Within that scope the "for all inputs" claim is real;
+outside it the prover refuses to certify.
 
 ```
 ✅ PROVEN  — for ALL inputs, the hook never accepts when drops > LIM.
@@ -221,12 +223,14 @@ is built so it can never silently lie:
 - **Host-return lengths and uninitialized memory are symbolic** (worst case), so
   length-gated branches — like the guardrail's `hook_param(DST) == 20` lock — are
   actually explored, not constant-folded away.
-- **`otxn_type` and all inputs are free symbolic** — over-approximating, the safe
-  direction (can add spurious paths, never hide a real one).
-- **Unsupported opcodes (`br_table`, `call_indirect`) and un-inlined local calls
-  fail closed** — an unmodeled opcode is recorded and the verdict becomes
-  **INCONCLUSIVE**; an unsupported decode/inline raises. Either way, never a silent
-  drop and never a PROVEN.
+- **`otxn_type`, all inputs, and every non-native otxn field are free symbolic** —
+  over-approximating, the safe direction (can add spurious paths, never hide a real
+  one). A hook gating accept on any field is explored, not skipped.
+- **`switch`/`br_table` is executed** — forked over every labelled target plus the
+  default (`idx >= n`), exhaustively and exclusively, so no real case is dropped.
+- **Unsupported opcodes (`call_indirect`) and un-inlined local calls fail closed**
+  — an unmodeled opcode is recorded and the verdict becomes **INCONCLUSIVE**; an
+  unsupported decode/inline raises. Either way, never a silent drop and never a PROVEN.
 
 This engine was **self-audited across three lenses** (symbolic-execution soundness,
 WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
@@ -238,9 +242,9 @@ WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
 - div/rem treated as total → trap path could reach `accept` → now **÷0 / `INT_MIN/-1` model as rollback**
 - i64 locals + the global section were guessed → now **decoded at real width / init value**
 
-The remaining gaps (`br_table`, `call_indirect`, un-inlined local calls, symbolic
-memory addresses) all **fail closed** — unmodeled opcodes drive the verdict to
-INCONCLUSIVE, and unsupported decodes/inlines raise; never a silent certificate.
+The remaining gaps (`call_indirect`, un-inlined local calls, symbolic
+memory addresses, IOU/XFL amounts) all **fail closed** — unmodeled opcodes drive the
+verdict to INCONCLUSIVE, and unsupported decodes/inlines raise; never a silent certificate.
 Regression tests in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
@@ -252,8 +256,8 @@ values never move backwards), **no-double-spend** (bounded emit count), and
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
 concrete attack txns. Wired into `xahc prove`. Scope (native single-payment hooks;
-Amount/Account/Destination modeled; no `br_table`/`call_indirect`/IOU-XFL) is
-enforced by failing closed to INCONCLUSIVE outside it.
+all otxn fields modeled — native or symbolic; `switch`/`br_table` executed; no
+`call_indirect`/IOU-XFL) is enforced by failing closed to INCONCLUSIVE outside it.
 
 Roadmap:
 - **invariant DSL** — state the property in one line instead of a Python driver
