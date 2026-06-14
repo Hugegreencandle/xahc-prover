@@ -1,4 +1,9 @@
-"""Prove NO ARITHMETIC OVERFLOW reaches an accept — OWASP SC07/09.
+"""Prove a uint64 OVERFLOW can't BYPASS THE LIMIT CHECK (drops+tip vs LIM) — OWASP SC07/09.
+
+SCOPE: proves the specific property below — an accepting path's TRUE (un-wrapped) total never
+exceeds LIM. This is NOT a proof that the hook is free of ALL arithmetic overflow; an unrelated
+wrap elsewhere (e.g. a product not feeding the limit check) is out of scope. Semi-specialized to
+this shape (like prove_limit) — do not read it as "no overflow anywhere".
 
 Demo shape (semi-specialized, like prove_limit): a hook accepts when
 (incoming_drops + TIP) <= LIM. If `drops + tip` wraps uint64, the hook's 64-bit check

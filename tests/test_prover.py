@@ -147,6 +147,85 @@ def test_matrix_verdicts():
     assert prove_overflow.main(os.path.join(H, "overflow_bug.wasm")) == 2       # drops+tip wraps -> CEX
 
 
+# --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
+# Hooks compiled with xahc and committed as adv_*.wasm. Each probes a way an
+# attacker could try to win a false PROVEN; the decisive assertion is that the
+# driver NEVER says PROVEN(0) when the invariant is actually violable.
+
+def test_authz_adversarial_no_false_proven():
+    # PREFIX MATCH: compares only the first 4 of 20 account bytes. An attacker
+    # matching the prefix but differing in an unchecked byte is still "authorized".
+    # The driver's negation must cover all 20 bytes -> CEX, never PROVEN.
+    assert prove_authz.main(os.path.join(H, "adv_authz_prefix.wasm")) == 2
+    # BRANCH BYPASS: a fast-path accepts before the auth check runs -> CEX.
+    assert prove_authz.main(os.path.join(H, "adv_authz_bypass.wasm")) == 2
+
+
+def test_authz_vacuous_proof_is_disclosed():
+    # A hook that can NEVER accept makes the universal "accept => owner" vacuously
+    # true. This is SOUND (no violable accept exists) but the verdict is vacuous;
+    # pin the current behavior AND assert the disclosure (0 accepting paths) so a
+    # future change that turns a real accept into a hidden vacuous proof is caught.
+    e = Engine(open(os.path.join(H, "adv_authz_vacuous.wasm"), "rb").read()); e.run()
+    assert len(e.accepts) == 0, "vacuous fixture should have no accept path"
+    assert prove_authz.main(os.path.join(H, "adv_authz_vacuous.wasm")) == 0
+
+
+def test_authz_good_proof_is_non_vacuous():
+    # The PROVEN on the correct authz hook must be backed by a REACHABLE owner-accept
+    # (origin == owner), not a vacuous one — else "PROVEN" would be meaningless.
+    e = Engine(open(os.path.join(H, "authz.wasm"), "rb").read()); e.run()
+    assert len(e.accepts) >= 1
+    origin, me = e.inputs["origin"], e.inputs["hookacc"]
+    reach = False
+    for _code, cons in e.accepts:
+        s = z3.Solver(); s.add(*cons)
+        s.add(z3.And(*[origin[i] == me[i] for i in range(20)]))
+        if s.check() == z3.sat:
+            reach = True
+    assert reach, "good authz PROVEN is vacuous — owner-accept not reachable"
+
+
+def test_validate_adversarial_no_false_proven():
+    # UNSIGNED-CAST BUG: the hook checks (uint32_t)ret > 0, which a NEGATIVE (absent)
+    # int64 return passes. The engine keeps ret signed/symbolic, so the param-absent
+    # accept path is reachable -> CEX, never PROVEN.
+    assert prove_validate.main(os.path.join(H, "adv_validate_negcast.wasm"), "LIM") == 2
+    # The CORRECT signed check (ret == 8) must PROVE — confirms the driver is not
+    # trivially always-CEX (it discriminates correct vs buggy presence checks).
+    assert prove_validate.main(os.path.join(H, "adv_validate_signedok.wasm"), "LIM") == 0
+
+
+def test_overflow_adversarial_catches_wrap():
+    # MUL hook (total = drops*tip, unguarded): the driver's drops+tip-vs-LIM spec
+    # still flags an over-limit accept -> CEX (the engine models the wrap with native
+    # 64-bit BV multiply, so nothing is silently dropped).
+    assert prove_overflow.main(os.path.join(H, "adv_overflow_mul.wasm")) == 2
+
+
+def test_overflow_driver_scope_is_addonly_not_all_arithmetic():
+    # SCOPE PIN (documents a real limitation, not a bug): adv_overflow_hidden_mul
+    # correctly GUARDS drops+tip (the driver's invariant) but contains a separate,
+    # UNGUARDED drops*tip that wraps on an accept path. The driver proves only its
+    # stated drops+tip property, so it returns PROVEN(0) — which is SOUND for that
+    # invariant. We assert (a) the engine genuinely modeled the product wrap on an
+    # accept path, and (b) the verdict is PROVEN, locking in that the "no arithmetic
+    # overflow" headline means specifically the drops+tip-vs-LIM property.
+    e = Engine(open(os.path.join(H, "adv_overflow_hidden_mul.wasm"), "rb").read()); e.run()
+    amt, tip = e.inputs["amt"], e.inputs["param:TIP"]
+    drops = z3.ZeroExt(64, z3.Concat(amt[0] & 0x3F, *amt[1:]))
+    tipv = z3.ZeroExt(64, z3.Concat(*tip[:8]))
+    prod128 = drops * tipv
+    prod64 = z3.ZeroExt(64, z3.Extract(63, 0, drops) * z3.Extract(63, 0, tipv))
+    wrapped_on_accept = False
+    for _code, cons in e.accepts:
+        s = z3.Solver(); s.add(*cons); s.add(prod128 != prod64)
+        if s.check() == z3.sat:
+            wrapped_on_accept = True
+    assert wrapped_on_accept, "engine failed to model the unguarded MUL wrap"
+    assert prove_overflow.main(os.path.join(H, "adv_overflow_hidden_mul.wasm")) == 0
+
+
 def test_decoder_tracks_types():
     from wasm import parse
     _, fs, _, g, _ = parse(open(os.path.join(H, "agent_guardrail.wasm"), "rb").read())

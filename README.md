@@ -313,8 +313,9 @@ Proves ten invariants — **spend-limit**, **destination-allowlist**,
 values never move backwards), **no-double-spend** (bounded emit count),
 **balance-conservation** (emits ≤ received), **IOU/issued-amount limit** (XFL),
 **authorization** (only the owner can trigger — OWASP SC01), **input-validation**
-(no accept on an absent required param — SC05), and **no-overflow** (uint64 arithmetic
-can't wrap past a check — SC07/09) — on real compiled WASM including the
+(no accept on an absent required param — SC05), and **overflow-safe limit** (a uint64
+wrap can't bypass the limit check — SC07/09; scoped to the limit, not all arithmetic) — on
+real compiled WASM including the
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
 concrete attack txns. All wired into `xahc prove`. Scope (native single-payment hooks;
