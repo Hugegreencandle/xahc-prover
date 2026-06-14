@@ -62,7 +62,7 @@ def feasible(cons) -> bool:
 
 class Engine:
     def __init__(self, wasm: bytes):
-        self.imports, self.funcs, self.datas = parse(wasm)
+        self.imports, self.funcs, self.datas, self.globals_init = parse(wasm)
         self.inputs: dict = {}       # name -> list[BitVec(8)] symbolic input bytes
         self.accepts: list = []      # (code:int|None, cons) per accepting path
         self.rollbacks: list = []    # (code, cons)
@@ -160,9 +160,19 @@ class Engine:
     def run(self):
         f = self.hook
         p = Path()
-        p.locals = [z3.BitVec("arg_reserved", 32)] + [z3.BitVecVal(0, 32)] * f.nlocals
-        # note: locals after params default i32 0; i64 locals get widened lazily on first set
-        p.globals[0] = z3.BitVecVal(STACK_PTR_INIT, 32)
+        # params + locals at their DECLARED widths (i64 locals must init 64-bit, or a
+        # read-before-write would be a wrong-width 0).
+        wbits = lambda vt: 64 if vt in (0x7E, 0x7C) else 32
+        ptypes = f.paramtypes or [0x7F] * f.nparams
+        p.locals = [z3.BitVec(f"arg_{i}", wbits(vt)) for i, vt in enumerate(ptypes)]
+        p.locals += [z3.BitVecVal(0, wbits(vt)) for vt in f.localtypes]
+        # globals at their real init values (the decoder parses the global section);
+        # fall back to a concrete stack pointer only if the module declared none.
+        if self.globals_init:
+            for idx, (val, w) in enumerate(self.globals_init):
+                p.globals[idx] = z3.BitVecVal(val & ((1 << w) - 1), w)
+        else:
+            p.globals[0] = z3.BitVecVal(STACK_PTR_INIT, 32)
         for off, data in self.datas:
             for k, b in enumerate(data):
                 p.mem[off + k] = z3.BitVecVal(b, 8)
@@ -314,6 +324,11 @@ class Engine:
                 val = p.stack.pop(); base = conc(p.stack.pop()); addr = base + ins.imm
                 n = self._storesize(op)
                 self.store(p, addr, n, val); return [(None, p)]
+            # ---- div/rem: WASM TRAPS on /0 and INT_MIN/-1; a trap is a rollback
+            #      (reject), never a value that flows on to accept ----
+            if op in ("i32.div_s", "i32.div_u", "i32.rem_s", "i32.rem_u",
+                      "i64.div_s", "i64.div_u", "i64.rem_s", "i64.rem_u"):
+                return self._divrem(op, p)
             # ---- arithmetic / comparison ----
             return [(None, self._alu(op, p))]
         except IndexError:
@@ -336,6 +351,29 @@ class Engine:
         return {"i32.store": 4, "i64.store": 8, "i32.store8": 1, "i32.store16": 2,
                 "i64.store8": 1, "i64.store16": 2, "i64.store32": 4}[op]
 
+    def _divrem(self, op, p):
+        b = p.stack[-1]
+        a = p.stack[-2]
+        sz = a.size()
+        trap = (b == 0)
+        if op.endswith("div_s") or op.endswith("rem_s"):
+            minv = z3.BitVecVal(1 << (sz - 1), sz)
+            neg1 = z3.BitVecVal((1 << sz) - 1, sz)
+            trap = z3.Or(trap, z3.And(a == minv, b == neg1))
+        out = []
+        # trap -> the hook aborts and the transaction is REJECTED (record as a
+        # rollback terminal; the path does not continue to any accept).
+        pt = p.clone(); pt.cons.append(trap)
+        if feasible(pt.cons):
+            self.rollbacks.append((None, list(pt.cons)))
+        # no trap -> the value flows on
+        pv = p.clone(); pv.cons.append(z3.Not(trap))
+        if feasible(pv.cons):
+            pv.stack.pop(); pv.stack.pop()
+            pv.stack.append(self._binop(op, a, b))
+            out.append((None, pv))
+        return out
+
     def _alu(self, op, p):
         st = p.stack
         # unary
@@ -349,8 +387,13 @@ class Engine:
             a = st.pop(); st.append(z3.SignExt(32, a)); return p
         if op == "i64.extend_i32_u":
             a = st.pop(); st.append(z3.ZeroExt(32, a)); return p
-        if op in ("i32.clz", "i32.ctz", "i32.popcnt"):
-            st.pop(); st.append(z3.BitVec(op, 32)); return p  # rarely on hot path; abstract
+        if op in ("i32.clz", "i32.ctz", "i32.popcnt", "i64.clz", "i64.ctz", "i64.popcnt"):
+            # Over-approximate to a FRESH symbolic (unique per occurrence — a shared
+            # name would wrongly force two independent results equal, hiding bugs).
+            st.pop()
+            self._undef += 1
+            w = 64 if op.startswith("i64") else 32
+            st.append(z3.BitVec(f"{op}_{self._undef}", w)); return p
         # binary
         b = st.pop(); a = st.pop()
         st.append(self._binop(op, a, b))
@@ -360,7 +403,10 @@ class Engine:
         f = {
             "add": lambda: a + b, "sub": lambda: a - b, "mul": lambda: a * b,
             "and": lambda: a & b, "or": lambda: a | b, "xor": lambda: a ^ b,
-            "shl": lambda: a << b, "shr_u": lambda: z3.LShR(a, b), "shr_s": lambda: a >> b,
+            # WASM masks the shift count mod width (k & 31 / k & 63); Z3 does not.
+            "shl": lambda: a << (b & (a.size() - 1)),
+            "shr_u": lambda: z3.LShR(a, b & (a.size() - 1)),
+            "shr_s": lambda: a >> (b & (a.size() - 1)),
             "div_u": lambda: z3.UDiv(a, b), "div_s": lambda: a / b,
             "rem_u": lambda: z3.URem(a, b), "rem_s": lambda: z3.SRem(a, b),
             "rotl": lambda: z3.RotateLeft(a, b), "rotr": lambda: z3.RotateRight(a, b),

@@ -70,6 +70,8 @@ class Func:
     nlocals: int            # declared locals (after params)
     nparams: int
     body: list
+    localtypes: list = field(default_factory=list)  # valtype byte per declared local
+    paramtypes: list = field(default_factory=list)   # valtype byte per param
 
 
 # opcode -> (mnemonic, immediate-kind)
@@ -105,6 +107,8 @@ OPS = {
     0x71: ("i32.and", ""), 0x72: ("i32.or", ""), 0x73: ("i32.xor", ""),
     0x74: ("i32.shl", ""), 0x75: ("i32.shr_s", ""), 0x76: ("i32.shr_u", ""),
     0x77: ("i32.rotl", ""), 0x78: ("i32.rotr", ""),
+    0x67: ("i32.clz", ""), 0x68: ("i32.ctz", ""), 0x69: ("i32.popcnt", ""),
+    0x79: ("i64.clz", ""), 0x7A: ("i64.ctz", ""), 0x7B: ("i64.popcnt", ""),
     0x7C: ("i64.add", ""), 0x7D: ("i64.sub", ""), 0x7E: ("i64.mul", ""),
     0x7F: ("i64.div_s", ""), 0x80: ("i64.div_u", ""), 0x81: ("i64.rem_s", ""), 0x82: ("i64.rem_u", ""),
     0x83: ("i64.and", ""), 0x84: ("i64.or", ""), 0x85: ("i64.xor", ""),
@@ -173,6 +177,7 @@ def parse(wasm: bytes):
     type_sigs: list[tuple] = []     # (params, results)
     code_funcs: list[Func] = []
     datas: list[tuple] = []         # (offset, bytes) active data segments
+    globals_init: list[tuple] = []  # (init_value, width_bits) per DEFINED global
     exports_fn: list[tuple] = []    # (name, func_idx) — applied after code is parsed
     import_func_count = 0
 
@@ -207,6 +212,21 @@ def parse(wasm: bytes):
             n = r.uleb()
             for _ in range(n):
                 func_type_idx.append(r.uleb())
+        elif sid == 6:  # global — DEFINED globals (init exprs). Hooks have no
+            # imported globals, so defined-global index space starts at 0.
+            n = r.uleb()
+            for _ in range(n):
+                vt = r.byte(); r.byte()  # valtype, mutability
+                op = r.byte()
+                if op in (0x41, 0x42):      # i32.const / i64.const
+                    val = r.sleb()
+                elif op == 0x23:            # global.get init (imported global) — rare
+                    r.uleb(); val = 0
+                else:
+                    val = 0
+                r.byte()  # 0x0b end
+                w = 64 if vt in (0x7E, 0x7C) else 32
+                globals_init.append((val, w))
         elif sid == 10:  # code
             n = r.uleb()
             for fi in range(n):
@@ -214,12 +234,15 @@ def parse(wasm: bytes):
                 fend = r.i + fsize
                 nlocal_decls = r.uleb()
                 nlocals = 0
+                localtypes: list = []
                 for _ in range(nlocal_decls):
-                    cnt = r.uleb(); r.byte()  # count, valtype
+                    cnt = r.uleb(); vt = r.byte()  # count, valtype
                     nlocals += cnt
+                    localtypes += [vt] * cnt
                 body, _ = _decode_seq(r)
                 tparams, _ = type_sigs[func_type_idx[fi]]
-                code_funcs.append(Func(name="?", nparams=len(tparams), nlocals=nlocals, body=body))
+                code_funcs.append(Func(name="?", nparams=len(tparams), nlocals=nlocals,
+                                       body=body, localtypes=localtypes, paramtypes=list(tparams)))
                 r.i = fend
         elif sid == 11:  # data — active segments seed initial memory
             n = r.uleb()
@@ -253,4 +276,4 @@ def parse(wasm: bytes):
             if li < len(code_funcs):
                 code_funcs[li].name = nm
 
-    return imports, code_funcs, datas
+    return imports, code_funcs, datas, globals_init

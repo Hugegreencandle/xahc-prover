@@ -109,10 +109,19 @@ is built so it can never silently lie:
 - **Unsupported opcodes / `call_indirect` / un-inlined local calls RAISE** — they
   never silently drop a path.
 
-This engine was **self-audited for soundness**: two false-PROVEN vectors were found
-and fixed (a hardcoded `hook_param` length that dead-coded the DST branch; silent
-loop-bound pruning that ignored the real guard maxiter). Verdicts: `PROVEN` /
-`COUNTEREXAMPLE` / `INCONCLUSIVE`.
+This engine was **self-audited across three lenses** (symbolic-execution soundness,
+WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
+
+- `hook_param` hardcoded length → dead-coded the DST branch → now **symbolic length**
+- fixed loop-unroll bound → silently dropped paths → now **reads the real `_g` maxiter**, else INCONCLUSIVE
+- `clz`/`ctz`/`popcnt` shared one symbol → forced independent results equal → now **fresh per occurrence**
+- shifts unmasked → `x << 32` gave `0` not `x` → now **masked mod width** (WASM-faithful)
+- div/rem treated as total → trap path could reach `accept` → now **÷0 / `INT_MIN/-1` model as rollback**
+- i64 locals + the global section were guessed → now **decoded at real width / init value**
+
+The remaining gaps (un-inlined local calls, `call_indirect`, symbolic memory
+addresses) all **fail loud** (raise) — never a silent certificate. Regression tests
+in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
