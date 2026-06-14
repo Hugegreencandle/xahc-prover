@@ -46,7 +46,12 @@ def main(path: str, max_drops: int | None = None) -> int:
         s.add(z3.UGT(drops, limit))             # ...that the hook still accepted over-limit
         if max_drops is not None:
             s.add(z3.ULE(drops, z3.BitVecVal(max_drops, 64)))
-        if s.check() == z3.sat:
+        r = s.check()
+        if r == z3.unknown:
+            print("\n⚠️ INCONCLUSIVE [spend-limit] — solver returned `unknown` "
+                  "(timeout/incompleteness) on an accepting path; cannot claim PROVEN.")
+            return 3
+        if r == z3.sat:
             m = s.model()
             ev = lambda b: m.eval(b, model_completion=True).as_long()
             av = bytes(ev(b) for b in amt)
@@ -73,7 +78,12 @@ def main(path: str, max_drops: int | None = None) -> int:
             s.add(is_payment, is_outgoing)              # an OUTGOING PAYMENT
             s.add(dst_ret == 20)                        # ...with a DST policy set
             s.add(dest_mismatch)                        # ...to a NON-allowed destination
-            if s.check() == z3.sat:
+            r = s.check()
+            if r == z3.unknown:
+                print("\n⚠️ INCONCLUSIVE [dst-lock] — solver returned `unknown` "
+                      "(timeout/incompleteness) on an accepting path; cannot claim PROVEN.")
+                return 3
+            if r == z3.sat:
                 m = s.model()
                 ev = lambda b: m.eval(b, model_completion=True).as_long()
                 dv = bytes(ev(b) for b in dest)
@@ -85,6 +95,11 @@ def main(path: str, max_drops: int | None = None) -> int:
     else:
         dst_proven = False   # hook reads no DST param — lock invariant N/A
 
+    if e.unsupported:
+        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
+              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove. "
+              f"Refusing to claim PROVEN.")
+        return 3
     if e.hit_bound:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
         return 3

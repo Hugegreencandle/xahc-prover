@@ -36,7 +36,13 @@ def main(path: str, max_drops: int | None = None) -> int:
         s.add(z3.UGT(drops, limit))   # an accept that lets drops exceed the limit
         if max_drops is not None:
             s.add(z3.ULE(drops, z3.BitVecVal(max_drops, 64)))  # only reachable amounts
-        if s.check() == z3.sat:
+        r = s.check()
+        if r == z3.unknown:
+            # SOUND: `unknown` is NOT proof there's no over-limit accept.
+            print("\n⚠️ INCONCLUSIVE — the solver returned `unknown` (timeout/"
+                  "incompleteness) checking an accepting path; cannot claim PROVEN.")
+            return 3
+        if r == z3.sat:
             m = s.model()
             av = [m.eval(b, model_completion=True).as_long() for b in amt]
             lv = [m.eval(b, model_completion=True).as_long() for b in lim]
@@ -48,6 +54,11 @@ def main(path: str, max_drops: int | None = None) -> int:
             print(f"   LIM param bytes = {bytes(lv).hex().upper()}")
             return 2
 
+    if e.unsupported:
+        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
+              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove. "
+              f"Refusing to claim PROVEN.")
+        return 3
     if e.hit_bound:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
         return 3

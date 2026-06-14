@@ -31,16 +31,19 @@ over symbolic inputs (the amount, the limit, the accounts are free variables, no
 fixed numbers), forks at every branch, unrolls the bounded loops to their real guard
 budget, and hands the whole path space to Z3 — an SMT solver. Then it asks one
 question: *can any path that reaches `accept` violate the invariant?* If the answer is
-no, that's a proof, over every possible transaction. If the answer is yes, Z3 produces
-a model — a concrete transaction that breaks the hook. Not a warning. The attack.
+no, that's a proof over every input in the **modeled scope** (native single-payment
+hooks; the otxn fields Amount/Account/Destination; loops within their guard bound) —
+and outside that scope the verdict is INCONCLUSIVE, never a false green. If the answer
+is yes, Z3 produces a model — a concrete transaction that breaks the hook. Not a
+warning. The attack.
 
 #### The headline: the real guardrail is proven
 
 The flagship target isn't a toy. It's `agent_guardrail` — a hook for putting layer-1
 spending limits on an autonomous agent's account (pairs naturally with x402-style
-agentic payments: the agent signs off-chain, the hook bounds it on-chain). It's
-deployed on Xahau testnet. It has guarded loops, multiple branches, and an optional
-destination lock. The prover proves **two independent invariants on it at once**:
+agentic payments: the agent signs off-chain, the hook bounds it on-chain). It has
+guarded loops, multiple branches, and an optional destination lock. The prover proves
+**two independent invariants on it at once**:
 
 ```
 ✅ PROVEN [spend-limit] — never accepts an outgoing payment over LIM
@@ -48,7 +51,7 @@ destination lock. The prover proves **two independent invariants on it at once**
                           goes only to the allowed account
 ```
 
-For all inputs. Not for a test vector — for the entire input space.
+For all inputs in scope. Not for a test vector — for the entire modeled input space.
 
 #### A proof that can't fail is worthless
 
@@ -71,14 +74,17 @@ That's the class of bug that ships to mainnet and quietly drains a wallet.
 
 #### The math agrees with the chain
 
-A symbolic engine is only worth something if its verdicts match reality. Every verdict
-was confirmed on Xahau testnet — install the hook, send a 10-XAH payment against a
-5-XAH limit, read the ledger's `engine_result`:
+A symbolic engine is only worth something if its verdicts match reality. Each verdict
+is **reproducible on Xahau testnet** — install the hook, send a 10-XAH payment against
+a 5-XAH limit, read the ledger's `engine_result`. The expected results:
 
-| hook | prover | ledger |
+| hook | prover | expected ledger result |
 |---|---|---|
-| correct | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) ✓ |
-| inverted-compare bug | COUNTEREXAMPLE | `tesSUCCESS` (the ledger really does accept it) ✓ |
+| correct | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) |
+| inverted-compare bug | COUNTEREXAMPLE | `tesSUCCESS` (the ledger accepts the over-limit pay) |
+
+(Reproduce these yourself; concrete tx hashes / ledger indices to be pinned here once
+a run is recorded.)
 
 #### The part I'm actually proud of: I audited my own prover
 
@@ -101,9 +107,10 @@ It worked. Five times. A sample:
 
 All five found, all fixed, all pinned by regression tests. The engine now **fails
 closed**: three verdicts only — `PROVEN`, `COUNTEREXAMPLE`, `INCONCLUSIVE`. Every
-construct it can't yet handle (un-inlined local calls, `call_indirect`, symbolic
-memory addresses) *raises* — it never silently hands you a green checkmark it didn't
-earn. I wrote the self-audit up in the README because for a tool like this, the
+construct it can't yet handle (`br_table`, `call_indirect`, un-inlined local calls,
+symbolic memory addresses) fails closed — an unmodeled opcode forces INCONCLUSIVE and
+an unsupported decode/inline raises — so it never silently hands you a green checkmark
+it didn't earn. I wrote the self-audit up in the README because for a tool like this, the
 honesty about where it stops is the product.
 
 #### The trifecta
@@ -162,9 +169,9 @@ solver) and ask: can any path that reaches `accept` break the invariant?
 → PROVEN, or a concrete counterexample.
 
 **5/**
-The headline: it proves the REAL `agent_guardrail` hook deployed on testnet.
+The headline: it proves the `agent_guardrail` hook — a real spend-limit guardrail.
 
-Two invariants, one run, for ALL inputs:
+Two invariants, one run, for ALL inputs (within scope — native single-payment hooks; Amount/Account/Destination modeled):
 ✅ spend-limit — never accepts an outgoing payment over LIM
 ✅ dst-lock — when a destination policy is set, funds go ONLY to the allowed account
 
@@ -187,11 +194,11 @@ The prover catches it for every input:
 `Destination=…FF  allowed=…00` (differs only in byte 19)
 
 **8/**
-And the math agrees with the chain.
+And every verdict is reproducible on-chain.
 
-Every verdict confirmed on Xahau testnet — install, send, read `engine_result`:
-• correct hook → `tecHOOK_REJECTED` (rejects the over-limit pay) ✓
-• buggy hook → `tesSUCCESS` (the ledger really does accept it) ✓
+Run it on Xahau testnet yourself — install, send, read `engine_result`:
+• correct hook → `tecHOOK_REJECTED` (rejects the over-limit pay)
+• buggy hook → `tesSUCCESS` (the ledger accepts the over-limit pay)
 
 **9/**
 Now the part I'm proud of.
@@ -213,8 +220,9 @@ All found. All fixed. All regression-tested.
 The engine now fails closed. Three verdicts only: PROVEN / COUNTEREXAMPLE /
 INCONCLUSIVE.
 
-Everything it can't yet handle (un-inlined calls, call_indirect, symbolic memory
-addrs) RAISES. It never hands you a green checkmark it didn't earn.
+Everything it can't yet handle (br_table, call_indirect, un-inlined calls, symbolic
+memory addrs) fails closed — unmodeled opcodes force INCONCLUSIVE, unsupported
+decodes raise. It never hands you a green checkmark it didn't earn.
 
 **12/**
 This is the third leg of a trifecta for safe Hooks:

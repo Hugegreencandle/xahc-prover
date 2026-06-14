@@ -1,8 +1,17 @@
 # xahc-prover — *Don't test your money-Hook. Prove it.*
 
 A symbolic-execution engine that **mathematically proves** an Xahau Hook obeys an
-invariant — for **every possible transaction**, not just the ones you tested — or
-hands you the exact counterexample that breaks it.
+invariant — over **every input in the modeled scope**, not just the ones you tested
+— or hands you the exact counterexample that breaks it. When a hook falls outside
+that scope the verdict is **INCONCLUSIVE**, never a false PROVEN (it *fails closed*).
+
+**Scope of a PROVEN verdict (read this first).** "For all inputs" is precise but
+*bounded*. A PROVEN result holds for: native single-Payment hooks; the otxn fields
+the engine models — **sfAmount, sfAccount, sfDestination** (every other field is
+treated as absent); loops within their `_g` guard unroll bound; and the modeled
+subset of WASM. It does **not** yet cover `br_table` (clang `switch`),
+`call_indirect`, or IOU/XFL amounts — those force INCONCLUSIVE. Within that scope
+the "for all inputs" claim is real; outside it the prover refuses to certify.
 
 ```
 ✅ PROVEN  — for ALL inputs, the hook never accepts when drops > LIM.
@@ -54,10 +63,10 @@ python src/prove_guardrail.py hooks/agent_guardrail.wasm
 # ✅ PROVEN — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.
 ```
 
-This is the **actual `agent_guardrail` hook** deployed on Xahau testnet — multiple
-guarded loops (the 20-byte outgoing-account check), the `otxn_type`/incoming
-branches, and the optional destination lock — symbolically executed across every
-path. **Two independent invariants are proven at once:**
+This is the **`agent_guardrail` hook** (a realistic spend-limit guardrail) —
+multiple guarded loops (the 20-byte outgoing-account check), the
+`otxn_type`/incoming branches, and the optional destination lock — symbolically
+executed across every path. **Two independent invariants are proven at once:**
 
 ```
 ✅ PROVEN [spend-limit] — never accepts an outgoing payment over LIM.
@@ -161,22 +170,28 @@ Invariants: `limit` · `guardrail` · `termination` · `monotonic` · `nospend` 
 `xahc prove` locates the prover via `$XAHC_PROVER_DIR` (or a sibling checkout) and
 runs it against the built WASM.
 
-### Verified on-chain
+### Reproducing a verdict on-chain
 
-Every Prover verdict was confirmed on **Xahau testnet** — install the hook, send a
-10 XAH payment against a 5 XAH limit, read the ledger's `engine_result`:
+Each Prover verdict is **reproducible on Xahau testnet** — install the hook, send
+the transaction the verdict describes, and read the ledger's `engine_result`. The
+table below is the *expected* ledger behavior each verdict predicts; run it yourself
+to confirm:
 
-| hook | invariant | Prover | ledger |
+| hook | invariant | Prover | expected ledger result (reproduce) |
 |---|---|---|---|
-| correct | spend-limit | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) ✓ |
-| inverted-compare bug | spend-limit | COUNTEREXAMPLE | **`tesSUCCESS`** (the ledger really does accept it) ✓ |
-| `termination_bug`, drops%256=64 | guard-termination | COUNTEREXAMPLE | `tecHOOK_REJECTED`, `HookReturnCode=0x80…10` (guard kill) ✓ |
-| `termination_bug`, drops%256=4 | guard-termination | within budget → accept | **`tesSUCCESS`** ✓ |
+| correct | spend-limit | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) |
+| inverted-compare bug | spend-limit | COUNTEREXAMPLE | **`tesSUCCESS`** (the ledger accepts the over-limit pay) |
+| `termination_bug`, drops%256=64 | guard-termination | COUNTEREXAMPLE | `tecHOOK_REJECTED`, `HookReturnCode` = guard-kill code |
+| `termination_bug`, drops%256=4 | guard-termination | within budget → accept | **`tesSUCCESS`** |
 
-The math and the chain agree — on all three invariants. The guard-termination
-counterexample was confirmed live: the prover's predicted attack amount (last byte
-> 8) really does trigger a `GUARD_VIOLATION` on testnet, while an in-budget amount
-goes through. The hook has no `rollback()`, so the kill can only be the guard.
+To verify: install the hook, send a 10 XAH payment against a 5 XAH limit (and, for
+the termination cases, an amount whose last byte is > 8 vs ≤ 8), then read
+`engine_result`. The guard-termination prediction is that the attack amount (last
+byte > 8) triggers a `GUARD_VIOLATION` while an in-budget amount goes through; the
+hook has no `rollback()`, so a kill can only be the guard.
+
+> **TODO:** paste the concrete testnet tx hashes / ledger indices here once a run is
+> recorded. The verdicts above are reproducible, not yet pinned to published hashes.
 
 ## How it works
 
@@ -208,8 +223,10 @@ is built so it can never silently lie:
   actually explored, not constant-folded away.
 - **`otxn_type` and all inputs are free symbolic** — over-approximating, the safe
   direction (can add spurious paths, never hide a real one).
-- **Unsupported opcodes / `call_indirect` / un-inlined local calls RAISE** — they
-  never silently drop a path.
+- **Unsupported opcodes (`br_table`, `call_indirect`) and un-inlined local calls
+  fail closed** — an unmodeled opcode is recorded and the verdict becomes
+  **INCONCLUSIVE**; an unsupported decode/inline raises. Either way, never a silent
+  drop and never a PROVEN.
 
 This engine was **self-audited across three lenses** (symbolic-execution soundness,
 WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
@@ -221,9 +238,10 @@ WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
 - div/rem treated as total → trap path could reach `accept` → now **÷0 / `INT_MIN/-1` model as rollback**
 - i64 locals + the global section were guessed → now **decoded at real width / init value**
 
-The remaining gaps (un-inlined local calls, `call_indirect`, symbolic memory
-addresses) all **fail loud** (raise) — never a silent certificate. Regression tests
-in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
+The remaining gaps (`br_table`, `call_indirect`, un-inlined local calls, symbolic
+memory addresses) all **fail closed** — unmodeled opcodes drive the verdict to
+INCONCLUSIVE, and unsupported decodes/inlines raise; never a silent certificate.
+Regression tests in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
@@ -231,9 +249,11 @@ Proves six invariants — **spend-limit**, **destination-allowlist**,
 **guard-termination** (no `GUARD_VIOLATION`), **state-monotonicity** (persisted
 values never move backwards), **no-double-spend** (bounded emit count), and
 **balance-conservation** (emits ≤ received) — on real compiled WASM including the
-**`agent_guardrail`** deployed on testnet. Multi-function hooks supported via
+**`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
-concrete attack txns. Wired into `xahc prove`.
+concrete attack txns. Wired into `xahc prove`. Scope (native single-payment hooks;
+Amount/Account/Destination modeled; no `br_table`/`call_indirect`/IOU-XFL) is
+enforced by failing closed to INCONCLUSIVE outside it.
 
 Roadmap:
 - **invariant DSL** — state the property in one line instead of a Python driver

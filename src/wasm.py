@@ -141,7 +141,19 @@ def _decode_seq(r: Reader, stop_on_else=False):
             return out, "else"
         ins = Instr(mn)
         if mn in ("block", "loop", "if"):
-            r.byte()  # blocktype (we don't need it for the subset; 0x40 void or a valtype)
+            # Blocktype: one byte for the cases clang emits for hooks — 0x40 (void)
+            # or a single valtype (0x7F i32 / 0x7E i64 / 0x7D f32 / 0x7C f64). The
+            # spec also allows a *multi-value* blocktype encoded as a non-negative
+            # sLEB128 type index, but clang does not emit those for hooks (no
+            # multi-value results / params on these blocks). Guard defensively: a
+            # leading byte with the high bit set would be a multi-byte sLEB type
+            # index we don't model — fail loud rather than silently mis-align the
+            # decode (a wrong decode means a wrong proof).
+            bt = r.byte()
+            if bt & 0x80:
+                raise NotImplementedError(
+                    f"multi-value blocktype (type index 0x{bt:02x}...) not supported "
+                    f"by the prover decoder")
             body, term = _decode_seq(r)
             ins.body = body
             if mn == "if" and term == "else":

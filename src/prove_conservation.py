@@ -41,7 +41,12 @@ def main(path: str) -> int:
         s = z3.Solver()
         s.add(*cons)
         s.add(z3.UGT(total, incoming))           # emitted MORE than received → value created
-        if s.check() == z3.sat:
+        r = s.check()
+        if r == z3.unknown:
+            print("\n⚠️ INCONCLUSIVE — solver returned `unknown` (timeout/"
+                  "incompleteness) on an accepting path; cannot claim conservation.")
+            return 3
+        if r == z3.sat:
             m = s.model()
             ev = lambda b: m.eval(b, model_completion=True).as_long()
             print("\n❌ COUNTEREXAMPLE — an accepting path emits MORE than it received "
@@ -49,6 +54,16 @@ def main(path: str) -> int:
             print(f"   incoming = {ev(incoming)} drops   emitted total = {ev(total)} drops "
                   f"across {count} payment(s)")
             return 2
+
+    if e.unsupported:
+        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
+              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "
+              f"conservation. Refusing to claim PROVEN.")
+        return 3
+    if e.hit_bound:
+        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations "
+              "were not explored. Cannot claim PROVEN.")
+        return 3
 
     print("\n✅ PROVEN — for ALL inputs, the total emitted never exceeds the incoming "
           "amount. Balance is conserved; no value created.")

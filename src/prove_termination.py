@@ -33,7 +33,17 @@ def main(path: str) -> int:
             continue
         s = z3.Solver()
         s.add(*cons)
-        s.check()
+        r = s.check()
+        if r == z3.unknown:
+            # SOUND: a feasible-looking guard-violation path the solver can't decide
+            # is NOT proof of termination. Report INCONCLUSIVE, never PROVEN.
+            print("\n⚠️ INCONCLUSIVE — solver returned `unknown` (timeout/"
+                  "incompleteness) on a guard-violation path; cannot claim termination.")
+            return 3
+        if r != z3.sat:
+            # unsat under the recorded constraints — this violation path is not
+            # actually reachable; skip it (no counterexample here).
+            continue
         m = s.model()
         ev = lambda bs: bytes(m.eval(b, model_completion=True).as_long() & 0xFF for b in bs)
         print(f"\n❌ COUNTEREXAMPLE — guard 0x{gid:08X} (budget {maxiter}) can be crossed "
@@ -45,6 +55,11 @@ def main(path: str) -> int:
                 print(f"   {name} = {ev(bs).hex().upper()}")
         return 2
 
+    if e.unsupported:
+        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
+              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "
+              f"termination. Refusing to claim PROVEN.")
+        return 3
     if e.hit_bound:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound before its guard "
               "tripped; cannot claim termination.")

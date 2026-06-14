@@ -64,9 +64,20 @@ class Path:
 
 
 def feasible(cons) -> bool:
+    """Is this path's constraint set satisfiable?
+
+    SOUNDNESS: `feasible` is used both to PRUNE paths in the engine and to SKIP
+    paths in some drivers. In BOTH directions the conservative answer to a Z3
+    `unknown` (timeout/incompleteness) is True — keep the path. Treating `unknown`
+    as infeasible would silently drop a possibly-real path (and with it a possibly
+    -real counterexample), which is exactly the false-PROVEN failure mode. So only
+    a definitive `unsat` is allowed to discard a path; `sat` and `unknown` both
+    keep it (the eventual violation check re-runs the solver and reports `unknown`
+    as INCONCLUSIVE there).
+    """
     s = z3.Solver()
     s.add(*cons)
-    return s.check() == z3.sat
+    return s.check() != z3.unsat
 
 
 class Engine:
@@ -85,6 +96,12 @@ class Engine:
         # unroll bound. If True, the analysis is INCOMPLETE and must NOT claim
         # PROVEN — deeper iterations were not explored.
         self.hit_bound = False
+        # SOUNDNESS: opcodes the decoder accepts but the interpreter cannot model
+        # (e.g. clang's `switch` -> br_table, call_indirect). Reaching one means the
+        # analysis is INCOMPLETE for that path; the verdict must be INCONCLUSIVE,
+        # never PROVEN. Recorded here (rather than crashing with a confusing stack
+        # underflow) so drivers can fail closed.
+        self.unsupported = set()
         self._undef = 0              # counter for fresh uninitialized-memory bytes
         self._depth = 0              # call-inlining depth (recursion guard)
 
@@ -346,24 +363,32 @@ class Engine:
         return LOOP_UNROLL
 
     def _loop(self, body, p, budget):
+        # ITERATIVE unroll (no Python recursion per iteration). The recursive form
+        # blew the CPython recursionlimit (~1000) long before the advertised
+        # min(maxiter+2, 8192) cap, throwing RecursionError on perfectly legitimate
+        # high-iteration hooks. A worklist of (path, remaining-budget) frames honors
+        # the real bound without growing the call stack with the iteration count.
         out = []
-        for sig, pp in self._exec_seq(body, [p]):
-            if sig is None:
-                out.append((None, pp))            # fell through loop body -> exit loop
-            elif sig[0] == "br":
-                d = sig[1]
-                if d == 0:                         # branch to loop top -> iterate
-                    if budget > 0:
-                        out.extend(self._loop(body, pp, budget - 1))
+        work = [(p, budget)]
+        while work:
+            cur, b = work.pop()
+            for sig, pp in self._exec_seq(body, [cur]):
+                if sig is None:
+                    out.append((None, pp))            # fell through loop body -> exit loop
+                elif sig[0] == "br":
+                    d = sig[1]
+                    if d == 0:                         # branch to loop top -> iterate
+                        if b > 0:
+                            work.append((pp, b - 1))
+                        else:
+                            # A still-feasible back-edge dropped at the bound. The
+                            # analysis is now INCOMPLETE — record it so the verdict
+                            # cannot claim PROVEN (soundness over convenience).
+                            self.hit_bound = True
                     else:
-                        # A still-feasible back-edge dropped at the bound. The
-                        # analysis is now INCOMPLETE — record it so the verdict
-                        # cannot claim PROVEN (soundness over convenience).
-                        self.hit_bound = True
+                        out.append((("br", d - 1), pp))
                 else:
-                    out.append((("br", d - 1), pp))
-            else:
-                out.append((sig, pp))
+                    out.append((sig, pp))
         return out
 
     def _exec(self, ins, p):
@@ -400,6 +425,14 @@ class Engine:
                 return [(("return",), p)]
             if op in ("unreachable", "nop"):
                 return [] if op == "unreachable" else [(None, p)]
+            # ---- opcodes the decoder accepts but the interpreter cannot model ----
+            # br_table (clang's `switch`) and call_indirect have no sound execution
+            # here. Record the op so the verdict is forced to INCONCLUSIVE, and END
+            # this path cleanly instead of falling through to a misleading stack
+            # underflow / ValueError. SOUND: never PROVEN on an unmodeled op.
+            if op in ("br_table", "call_indirect"):
+                self.unsupported.add(op)
+                return []
             if op == "call":
                 if ins.imm < len(self.imports):
                     name = self.imports[ins.imm]
