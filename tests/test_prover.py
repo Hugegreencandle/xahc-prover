@@ -14,6 +14,7 @@ import prove_limit, prove_guardrail, prove_termination, prove_monotonic   # noqa
 import prove_nospend, prove_conservation                                  # noqa: E402
 import prove_limit_iou                                                    # noqa: E402
 import prove_authz, prove_validate, prove_overflow                        # noqa: E402
+import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
 H = os.path.join(ROOT, "hooks")
@@ -967,6 +968,70 @@ def test_call_indirect_unresolved_table_is_inconclusive():
     # a passive (flag-1) element section can't be resolved -> fail closed to INCONCLUSIVE.
     e = Engine(_indirect_module(codes=[0, 0], table_entries=[3, 4], passive=True)); e.run()
     assert "call_indirect" in e.unsupported, "unresolved table must force INCONCLUSIVE, not PROVEN"
+
+
+# --- invariant DSL: equivalence with hand drivers + soundness -----------------
+def test_dsl_equivalence_conservation():
+    for h, expect in [("emit_forward", 0), ("emit_double", 0), ("emit_inflate", 2)]:
+        w = os.path.join(H, f"{h}.wasm")
+        assert prove_dsl.main(w, "accept implies emitted_total <= incoming_drops") == expect
+        assert prove_conservation.main(w) == expect            # DSL == hand driver
+
+
+def test_dsl_equivalence_nospend():
+    for h, expect in [("emit_forward", 0), ("emit_double", 2)]:
+        w = os.path.join(H, f"{h}.wasm")
+        assert prove_dsl.main(w, "accept implies emit_count <= 1") == expect
+        assert prove_nospend.main(w) == expect
+
+
+def test_dsl_equivalence_limit():
+    exp = {"limit": 0, "limit_buggy": 2, "limit_inverted": 2}
+    for h, ex in exp.items():
+        assert prove_dsl.main(os.path.join(H, f"{h}.wasm"),
+                              "accept implies incoming_drops <= param[LIM]") == ex
+    assert prove_limit.main(os.path.join(H, "limit.wasm")) == 0          # hand agrees
+    assert prove_limit.main(os.path.join(H, "limit_buggy.wasm")) == 2
+
+
+def test_dsl_rejects_unknown_identifier():
+    # unknown id -> HARD reject (exit 1), never a silent pass
+    assert prove_dsl.main(os.path.join(H, "limit.wasm"), "accept implies foobar <= 5") == 1
+
+
+def test_dsl_rejects_bad_token_and_xfl_arithmetic():
+    assert prove_dsl.main(os.path.join(H, "limit.wasm"), "accept implies emit_count <= 1 ** 2") == 1
+    assert prove_dsl.main(os.path.join(H, "limit_iou.wasm"),
+                          "accept implies iou_amount <= xfl(5) + xfl(3)") == 1   # no XFL arithmetic
+
+
+def test_dsl_violation_is_counterexample():
+    # emit_forward emits exactly once; "emit_count >= 2" is false on its accept path -> CEX
+    assert prove_dsl.main(os.path.join(H, "emit_forward.wasm"),
+                          "accept implies emit_count >= 2") == 2
+
+
+def test_dsl_negation_is_correct():
+    # the proof negates the predicate; a wrong negation = a false PROVEN. Pin it.
+    fwd = os.path.join(H, "emit_forward.wasm")     # emit_count == 1
+    dbl = os.path.join(H, "emit_double.wasm")      # emit_count == 2
+    assert prove_dsl.main(fwd, "accept implies not (emit_count == 1)") == 2   # not(true)=false -> CEX
+    assert prove_dsl.main(dbl, "accept implies not (emit_count == 1)") == 0   # not(false)=true -> PROVEN
+    # De Morgan: not(a and b) must give the same verdict as (not a) or (not b)
+    a = prove_dsl.main(dbl, "accept implies not (emit_count >= 1 and emit_count <= 1)")
+    b = prove_dsl.main(dbl, "accept implies (not emit_count >= 1) or (not emit_count <= 1)")
+    assert a == b == 0
+
+
+def test_dsl_float_overapprox_taints_to_inconclusive():
+    # an XFL-referencing predicate must fail closed to INCONCLUSIVE when a nonlinear float
+    # op was over-approximated — never PROVEN. Inject the taint to exercise the real gate.
+    e = Engine(open(os.path.join(H, "limit_iou.wasm"), "rb").read()); e.run()
+    e.float_overapprox.add("float_test_injected")
+    # a tautology over an XFL term: P or not P — provably no counterexample on any path,
+    # so the only thing that can change the verdict is the fail-closed taint gate.
+    ast = dsl.parse("accept implies (iou_amount <= xfl(1000000) or not (iou_amount <= xfl(1000000)))")
+    assert prove_dsl.evaluate(e, ast) == 3   # tainted XFL term -> INCONCLUSIVE, never PROVEN
 
 
 if __name__ == "__main__":

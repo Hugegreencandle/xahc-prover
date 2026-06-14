@@ -182,6 +182,24 @@ python src/prove_overflow.py hooks/overflow_bug.wasm
 The `authz` / `validate` / `overflow` correct variants all prove `✅ PROVEN`. See
 `docs/INVARIANT-CANDIDATES.md` for the sourced backlog these came from.
 
+## State a property in one line — the invariant DSL
+
+Instead of a Python driver, write the property directly:
+
+```sh
+python src/prove_dsl.py hooks/emit_inflate.wasm "accept implies emitted_total <= incoming_drops"
+python src/prove_dsl.py hooks/limit.wasm        "accept implies incoming_drops <= param[LIM]"
+```
+
+Same verdicts/exit codes as the hand drivers (cross-checked on every fixture). The DSL is a
+thin, **sound** front-end over the same engine: it only exposes quantities the engine models
+exactly (`incoming_drops`, `emitted_total`, `emit_count`, `accept_code`, `dest`,
+`param[…]`, `state_old/new[…]`, `iou_amount`), and **hard-rejects** any expression it can't
+translate completely (unknown term, unsupported operator, XFL arithmetic) rather than
+weakening it — a weakened invariant would be a false PROVEN. Grammar + scope:
+[docs/INVARIANT-DSL.md](docs/INVARIANT-DSL.md). It adds no modeling power, only a one-line
+way to state properties over what the engine already proves.
+
 ## Built into `xahc`
 
 The prover is wired into the toolchain — one command from source, CI-friendly exit
@@ -274,7 +292,7 @@ WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
 The remaining gaps (symbolic memory addresses, unresolvable element tables,
 table-slot-to-import, recursion past the depth cap) all **fail closed** — they drive the
 verdict to INCONCLUSIVE, and unsupported decodes raise; never a silent certificate.
-Regression tests in `tests/` (41). Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
+Regression tests in `tests/` (49). Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 The engine's hard-coded constants were cross-checked against ground truth
 (`XRPLF/hook-macros` `hookapi.h` + `sfcodes.h`, and a `float_one` decode, 2026-06-14):
@@ -300,7 +318,7 @@ all otxn fields modeled — native or symbolic; `switch`/`br_table` and `call_in
 executed; multi-function via inlining) is enforced by failing closed to INCONCLUSIVE outside it.
 
 Roadmap:
-- **invariant DSL** — state the property in one line instead of a Python driver
+- ~~invariant DSL~~ ✅ done — see below
 - **richer state model** — reserve safety (`-38`), foreign-state authorization (`-34`),
   emission-burden via `cbak` — unlocks invariants #5–7 in `docs/INVARIANT-CANDIDATES.md`
 - **`call_indirect` to host imports / unresolvable tables** — currently fail closed; model
