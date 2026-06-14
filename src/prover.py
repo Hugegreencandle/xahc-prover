@@ -13,11 +13,31 @@ arbitrary EVM contracts are not.
 from __future__ import annotations
 import z3
 from wasm import parse
+import xfl
 
 # Hook API field ids the models recognize
 SF_AMOUNT = 0x60001
 SF_ACCOUNT = 0x80001
 SF_DESTINATION = 0x80003
+
+# XFL bit layout (see xfl.py — verified float_one()==6089866696204910592)
+XFL_SIGN_BIT = 62          # 1 = positive, 0 = negative (inverted vs IEEE)
+XFL_NAN_BIT = 63           # set in a serialized issued STAmount value word; XFL clears it
+XFL_MANT_MASK = (1 << 54) - 1
+XFL_EXP_BIAS = 97
+
+# float_compare mode flags — HARD-CODED, verified vs hooks-rs c/hookapi.h.
+# A wrong flag map => a false PROVEN, so these are NOT to be "corrected".
+FCMP_EQ = 1
+FCMP_LT = 2
+FCMP_GT = 4
+
+# float_* host error sentinels (negative => error / rollback trigger in hooks)
+FE_INVALID_FLOAT = xfl.INVALID_FLOAT       # -10024
+FE_INVALID_ARGUMENT = xfl.INVALID_ARGUMENT # -7
+FE_CANT_RETURN_NEGATIVE = xfl.CANT_RETURN_NEGATIVE  # -33
+FE_DIVISION_BY_ZERO = xfl.DIVISION_BY_ZERO # -25
+FE_NOT_AN_AMOUNT = xfl.NOT_AN_AMOUNT       # -32
 
 LOOP_UNROLL = 64  # generous finite bound; guard maxiter is <= this for real hooks
 STACK_PTR_INIT = 0x10000  # global 0 (clang __stack_pointer) — concrete
@@ -36,7 +56,7 @@ class Terminal(Exception):
 
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
-                 "emit_count", "emits")
+                 "emit_count", "emits", "emits_iou")
 
     def __init__(self):
         self.stack: list = []
@@ -48,6 +68,7 @@ class Path:
         self.writes: dict = {}  # state key (str) -> last value written (BitVec) on this path
         self.emit_count: int = 0  # number of emit() calls on this path
         self.emits: list = []     # emitted native drops (BitVec64) or None if unparseable
+        self.emits_iou: list = [] # emitted IOU value as (xfl_bv, cur, iss) or None per emit
 
     def clone(self) -> "Path":
         p = Path()
@@ -60,6 +81,7 @@ class Path:
         p.writes = dict(self.writes)
         p.emit_count = self.emit_count
         p.emits = list(self.emits)
+        p.emits_iou = list(self.emits_iou)
         return p
 
 
@@ -90,6 +112,7 @@ class Engine:
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
+        self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
         self.hook = next(f for f in self.funcs if f.name == "hook")
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
@@ -102,7 +125,15 @@ class Engine:
         # never PROVEN. Recorded here (rather than crashing with a confusing stack
         # underflow) so drivers can fail closed.
         self.unsupported = set()
+        # SOUNDNESS (XFL/money): ops whose RESULT VALUE we could not compute soundly
+        # (any symbolic operand to a nonlinear float op) and replaced with a FRESH
+        # over-approximating symbolic. The value carries NO equality to the true XFL
+        # result. A driver MUST return INCONCLUSIVE (never PROVEN) if a value tainted
+        # by one of these can reach the invariant. Surfaced like self.unsupported.
+        self.float_overapprox = set()
         self._undef = 0              # counter for fresh uninitialized-memory bytes
+        self._float_fresh = 0        # counter for fresh over-approx float results
+        self._extra_forks = []       # error-sentinel sibling paths from the current host_call
         self._depth = 0              # call-inlining depth (recursion guard)
 
     def fresh_bytes(self, name: str, n: int):
@@ -142,6 +173,80 @@ class Engine:
         for k in range(n):
             p.mem[addr + k] = z3.Extract(8 * k + 7, 8 * k, val)
 
+    # ---- XFL (issued-amount float) modeling helpers ----
+    @staticmethod
+    def _is_concrete(bv) -> bool:
+        return z3.is_bv_value(z3.simplify(bv))
+
+    @staticmethod
+    def _val(bv) -> int:
+        return z3.simplify(bv).as_long()
+
+    def _fresh_float(self, tag: str):
+        """A fresh, unconstrained 64-bit symbolic XFL — the SOUND over-approximation
+        for an op whose value we cannot compute (any symbolic nonlinear operand).
+        Unique per call-site so two over-approximated results are never forced equal."""
+        self._float_fresh += 1
+        return z3.BitVec(f"floatoa_{tag}_{self._float_fresh}", 64)
+
+    def _xfl_components(self, x):
+        """Decode an XFL bitvec into (is_zero:Bool, sign01:BV1[bit62],
+        exp_unbiased:BV(signed-ish int as BV16), mant:BV64). EXACT bit ops only —
+        no 10^exp. mant is zero-extended; exp is the biased field minus 97 as a
+        signed 16-bit value (range comfortably fits exp in [-97,158])."""
+        is_zero = (x == z3.BitVecVal(0, 64))
+        sign01 = z3.Extract(XFL_SIGN_BIT, XFL_SIGN_BIT, x)              # BV1: 1=positive
+        exp_field = z3.ZeroExt(8, z3.Extract(61, 54, x))               # BV16: biased exp 0..255
+        exp = exp_field - z3.BitVecVal(XFL_EXP_BIAS, 16)               # BV16 signed: unbiased
+        mant = z3.ZeroExt(10, z3.Extract(53, 0, x))                    # BV64: 54-bit mantissa
+        return is_zero, sign01, exp, mant
+
+    def _float_cmp_c(self, a, b):
+        """Build c in {-1,0,1} (as BV8) = signed XFL comparison, using ONLY linear
+        BV inequalities — NO 10^exp. Mirrors xfl.floatCmp EXACTLY.
+
+        Soundness of lexicographic (exp,mant) magnitude compare: every normal XFL
+        mantissa is normalized to [1e15,1e16) — a FIXED 16-decimal-digit width — so a
+        strictly larger exponent ALWAYS means a strictly larger magnitude regardless
+        of mantissa, and equal exponents compare by mantissa. That is exactly what
+        cmpMag computes via scaling, without needing the 10^ scale. For inputs that
+        are NOT normalized (an adversary hand-crafting a denormal XFL) this could
+        differ from xahaud; see _float_normalized() guard below — when a compared XFL
+        is symbolic we additionally constrain it to the normalized mantissa range so
+        the lexicographic compare is faithful, and over-approx otherwise.
+        """
+        za, sa, ea, ma = self._xfl_components(a)
+        zb, sb, eb, mb = self._xfl_components(b)
+        # value-sign: 0 if zero else (+1 if sign01==1 else -1)
+        one8, zero8, neg8 = z3.BitVecVal(1, 8), z3.BitVecVal(0, 8), z3.BitVecVal(-1, 8)
+        va = z3.If(za, zero8, z3.If(sa == z3.BitVecVal(1, 1), one8, neg8))
+        vb = z3.If(zb, zero8, z3.If(sb == z3.BitVecVal(1, 1), one8, neg8))
+        # magnitude compare (both non-zero, same sign): lexicographic (exp, mant)
+        mag = z3.If(ea > eb, one8,
+              z3.If(ea < eb, neg8,
+              z3.If(z3.UGT(ma, mb), one8,
+              z3.If(z3.ULT(ma, mb), neg8, zero8))))
+        # for negatives, larger magnitude = smaller value (flip)
+        signed_mag = z3.If(sa == z3.BitVecVal(1, 1), mag, -mag)
+        c = z3.If(va != vb,
+                  z3.If(va < vb, neg8, one8),       # different value-signs decide directly
+                  z3.If(z3.And(za, zb), zero8, signed_mag))
+        return c
+
+    def _float_normalized(self, x):
+        """Constraint that a symbolic XFL is either canonical zero OR has a mantissa
+        in the normalized range [1e15,1e16) and a representable exponent. Asserting
+        this on symbolic XFL operands of float_compare keeps the lexicographic
+        magnitude compare faithful to xahaud (which only ever produces normalized
+        XFLs). Sound: every XFL the host can hand a hook satisfies this; constraining
+        to it cannot invent a counterexample, only avoids a spurious one from an
+        unreachable denormal encoding."""
+        za, sa, ea, ma = self._xfl_components(x)
+        norm = z3.And(z3.UGE(ma, z3.BitVecVal(xfl.MIN_MANT, 64)),
+                      z3.ULT(ma, z3.BitVecVal(xfl.MAX_MANT, 64)),
+                      ea >= z3.BitVecVal(-96, 16), ea <= z3.BitVecVal(80, 16))
+        return z3.Or(x == z3.BitVecVal(0, 64), norm)
+
     # ---- host functions ----
     def host_call(self, name: str, p: Path):
         st = p.stack
@@ -170,7 +275,27 @@ class Engine:
         if name == "otxn_field":
             fid = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
             if fid == SF_AMOUNT:
-                bs = self.fresh_bytes("amt", 8); self.store_bytes(p, wptr, bs); st.append(z3.BitVecVal(8, 64))
+                # sfAmount is EITHER native (8-byte value word, bit63=0) OR issued
+                # (48-byte STAmount: 8-byte XFL value word with bit63=1, + 20 currency
+                # + 20 issuer). The hook signals which by the write-buffer size it
+                # passes: a 48-byte read wants the issued layout. Native stays the
+                # default 8-byte path so existing drivers are untouched.
+                if wlen >= 48:
+                    bs = self.fresh_bytes("amt48", 48)
+                    self.store_bytes(p, wptr, bs)
+                    # bit63 of byte0 = is-issued. The XFL value word (bytes 0..7) is the
+                    # serialized value with bit63 set; XFL clears it. Expose a clean
+                    # 64-bit XFL for IOU drivers AND constrain the read to a valid issued
+                    # STAmount (bit63=1) so the decode is faithful (sound: a native
+                    # amount wouldn't have been read with a 48-byte buffer).
+                    word = z3.Concat(*bs[:8])                      # big-endian 8-byte value word
+                    p.cons.append(z3.Extract(63, 63, word) == z3.BitVecVal(1, 1))
+                    xflv = word & z3.BitVecVal(~(1 << XFL_NAN_BIT) & ((1 << 64) - 1), 64)
+                    self.inputs["amt_xfl"] = xflv
+                    self.inputs["amt48"] = bs
+                    st.append(z3.BitVecVal(48, 64))
+                else:
+                    bs = self.fresh_bytes("amt", 8); self.store_bytes(p, wptr, bs); st.append(z3.BitVecVal(8, 64))
             elif fid == SF_ACCOUNT:
                 bs = self.fresh_bytes("origin", 20); self.store_bytes(p, wptr, bs); st.append(z3.BitVecVal(20, 64))
             elif fid == SF_DESTINATION:
@@ -245,13 +370,196 @@ class Engine:
             rlen = conc(st.pop()); rptr = conc(st.pop()); st.pop(); st.pop()
             p.emit_count += 1
             p.emits.append(self._emit_drops(p, rptr))
+            p.emits_iou.append(self._emit_iou_xfl(p, rptr))
             st.append(z3.BitVecVal(32, 64)); return                 # >=0 = emitted hash len
+        # ================= XFL (issued-amount) float host fns =================
+        # DISCIPLINE (money-hooks): EXACT bit-ops where possible; FOLD-TO-LITERAL via
+        # xfl.py for fully-concrete ops; FRESH SYMBOLIC over-approx (+ float_overapprox)
+        # for any symbolic nonlinear op; mark unsupported for the truly unmodelable.
+        if name == "float_one":
+            st.append(z3.BitVecVal(xfl.FLOAT_ONE, 64)); return
+        if name == "float_negate":
+            x = st.pop()
+            # EXACT: zero stays zero; else flip the sign bit (bit62)
+            st.append(z3.If(x == z3.BitVecVal(0, 64), x, x ^ z3.BitVecVal(1 << XFL_SIGN_BIT, 64)))
+            return
+        if name == "float_mantissa":
+            x = st.pop()
+            # EXACT: 0 -> 0; else low 54 bits, zero-extended to 64
+            mant = z3.ZeroExt(10, z3.Extract(53, 0, x))
+            st.append(z3.If(x == z3.BitVecVal(0, 64), z3.BitVecVal(0, 64), mant))
+            return
+        if name == "float_sign":
+            x = st.pop()
+            # EXACT: 0 -> 0; bit62==1 (positive) -> 0; else 1 (negative). Mirrors xfl.floatSign.
+            sign01 = z3.Extract(XFL_SIGN_BIT, XFL_SIGN_BIT, x)
+            st.append(z3.If(x == z3.BitVecVal(0, 64), z3.BitVecVal(0, 64),
+                            z3.If(sign01 == z3.BitVecVal(1, 1),
+                                  z3.BitVecVal(0, 64), z3.BitVecVal(1, 64))))
+            return
+        if name == "float_set":
+            mant = st.pop(); exp = st.pop()
+            if self._is_concrete(exp) and self._is_concrete(mant):
+                # FOLD: both concrete -> exact literal XFL via xfl.py
+                e = z3.simplify(z3.SignExt(32, exp) if exp.size() == 32 else exp).as_long()
+                e = e - (1 << 64) if e >= (1 << 63) else e         # interpret as signed
+                m = self._val(mant); m = m - (1 << 64) if m >= (1 << 63) else m
+                st.append(z3.BitVecVal(xfl.floatSet(e, m) & ((1 << 64) - 1), 64)); return
+            # symbolic exp/mant: over-approx (encode normalization is nonlinear in 10^exp)
+            self.float_overapprox.add("float_set")
+            st.append(self._fresh_float("set")); return
+        if name == "float_compare":
+            mode = conc(st.pop()); b = st.pop(); a = st.pop()
+            # EXACT ordering via linear BV compare. Constrain symbolic operands to the
+            # normalized XFL range so the lexicographic magnitude compare is faithful.
+            if not self._is_concrete(a):
+                p.cons.append(self._float_normalized(a))
+            if not self._is_concrete(b):
+                p.cons.append(self._float_normalized(b))
+            c = self._float_cmp_c(a, b)                            # BV8 in {-1,0,1}
+            cond = z3.BoolVal(False)
+            if mode & FCMP_EQ:
+                cond = z3.Or(cond, c == z3.BitVecVal(0, 8))
+            if mode & FCMP_LT:
+                cond = z3.Or(cond, c == z3.BitVecVal(-1, 8))
+            if mode & FCMP_GT:
+                cond = z3.Or(cond, c == z3.BitVecVal(1, 8))
+            st.append(z3.If(cond, z3.BitVecVal(1, 64), z3.BitVecVal(0, 64))); return
+        if name == "float_int":
+            absflag = conc(st.pop()); dp = st.pop(); x = st.pop()
+            dpc = self._val(dp) if self._is_concrete(dp) else None
+            # error forks: dp out of [0,15] -> -7. We need dp concrete to fold the
+            # value; a symbolic dp also can't be range-checked soundly -> over-approx.
+            if dpc is not None and self._is_concrete(x):
+                # FOLD fully-concrete via xfl.py (exact, incl. error sentinels)
+                xc = self._val(x)
+                r = xfl.floatInt(xc, dpc, absflag != 0)
+                st.append(z3.BitVecVal(r & ((1 << 64) - 1), 64)); return
+            # symbolic value (and/or dp): fork the error/value paths SOUNDLY.
+            # error: sign<0 && !abs -> -33 ; (dp range handled below if symbolic)
+            za, sa, ea, ma = self._xfl_components(x)
+            neg = z3.And(z3.Not(za), sa == z3.BitVecVal(0, 1))     # sign bit 0 = negative
+            out_stack = st
+            if absflag == 0:
+                # fork: negative-input error path returns -33
+                pe = p.clone(); pe.cons.append(neg); pe.stack.append(z3.BitVecVal(FE_CANT_RETURN_NEGATIVE & ((1<<64)-1), 64))
+                self._extra_forks.append(pe)
+                p.cons.append(z3.Not(neg))
+            # value path: over-approx (mant*10^exp is nonlinear in symbolic exp)
+            self.float_overapprox.add("float_int")
+            r = self._fresh_float("int")
+            # sound non-negativity fact: a successful float_int result is >= 0
+            p.cons.append(r >= z3.BitVecVal(0, 64))   # signed BV >= (z3 default)
+            out_stack.append(r); return
+        if name in ("float_sum", "float_multiply", "float_divide", "float_mulratio"):
+            if name == "float_mulratio":
+                den = st.pop(); num = st.pop(); rnd = st.pop(); a = st.pop(); b = None
+            else:
+                b = st.pop(); a = st.pop()
+            concrete = self._is_concrete(a) and (b is None or self._is_concrete(b))
+            if name == "float_mulratio":
+                concrete = concrete and self._is_concrete(num) and self._is_concrete(den)
+            if concrete:
+                av = self._val(a)
+                if name == "float_sum":
+                    r = xfl.floatSum(av, self._val(b))
+                elif name == "float_multiply":
+                    r = xfl.floatMultiply(av, self._val(b))
+                elif name == "float_divide":
+                    r = xfl.floatDivide(av, self._val(b))
+                else:
+                    nv = self._val(num); dv = self._val(den)
+                    nv = nv - (1 << 32) if nv >= (1 << 31) else nv
+                    dv = dv - (1 << 32) if dv >= (1 << 31) else dv
+                    r = xfl.floatMulratio(av, self._val(rnd), nv, dv)
+                st.append(z3.BitVecVal(r & ((1 << 64) - 1), 64)); return
+            # SYMBOLIC: fresh over-approx + ONLY sound facts.
+            self.float_overapprox.add(name)
+            if name in ("float_divide", "float_mulratio"):
+                # model den/divisor == 0 -> DIVISION_BY_ZERO (-25) fork, so a hook's
+                # `if (q < 0) rollback` over a div-by-zero is explored. Collapsing it
+                # could SKIP a rollback = false PROVEN.
+                divisor = b if name == "float_divide" else den
+                zb, _, _, _ = self._xfl_components(divisor)
+                pe = p.clone(); pe.cons.append(zb)
+                pe.stack.append(z3.BitVecVal(FE_DIVISION_BY_ZERO & ((1 << 64) - 1), 64))
+                self._extra_forks.append(pe)
+                p.cons.append(z3.Not(zb))
+            res = self._fresh_float(name.split("_")[1])
+            if name == "float_multiply" and b is not None:
+                # SOUND fact: result sign bit = (sign_a XNOR sign_b) when both nonzero;
+                # result is zero iff either operand is zero. (No value/magnitude claim.)
+                za, sa, _, _ = self._xfl_components(a)
+                zb, sb, _, _ = self._xfl_components(b)
+                anyzero = z3.Or(za, zb)
+                rsign = z3.Extract(XFL_SIGN_BIT, XFL_SIGN_BIT, res)
+                same = (sa == sb)  # same sign bit -> positive product
+                p.cons.append(z3.If(anyzero, res == z3.BitVecVal(0, 64),
+                                    rsign == z3.If(same, z3.BitVecVal(1, 1), z3.BitVecVal(0, 1))))
+            st.append(res); return
+        if name == "float_invert":
+            x = st.pop()
+            if self._is_concrete(x):
+                st.append(z3.BitVecVal(xfl.floatInvert(self._val(x)) & ((1 << 64) - 1), 64)); return
+            # symbolic: x==0 -> DIVISION_BY_ZERO fork (float_invert = 1/x)
+            self.float_overapprox.add("float_invert")
+            zx, _, _, _ = self._xfl_components(x)
+            pe = p.clone(); pe.cons.append(zx)
+            pe.stack.append(z3.BitVecVal(FE_DIVISION_BY_ZERO & ((1 << 64) - 1), 64))
+            self._extra_forks.append(pe)
+            p.cons.append(z3.Not(zx))
+            st.append(self._fresh_float("invert")); return
+        if name in ("float_log", "float_root"):
+            # No sound model -> ALWAYS unsupported (forces INCONCLUSIVE), plus a fresh
+            # symbolic so execution can continue without a stack underflow.
+            if name == "float_root":
+                st.pop()  # float_root(x, n) takes 2 args
+            st.pop()
+            self.unsupported.add(name)
+            st.append(self._fresh_float(name.split("_")[1])); return
+        if name == "float_sto":
+            # float_sto(wp, wl, cp, cl, ip, il, xfl, field_code) -> length written.
+            # STRUCTURAL per sandbox.ts: write the 48-byte issued STAmount value so a
+            # conservation re-read sees real bytes. We also model x<0 -> -7 fork.
+            fieldcode = conc(st.pop()); xv = st.pop()
+            il = conc(st.pop()); ip = conc(st.pop())
+            cl = conc(st.pop()); cp = conc(st.pop())
+            wlen = conc(st.pop()); wptr = conc(st.pop())
+            # x < 0 (top NaN/sign pattern) is INVALID_ARGUMENT. Fork it so a hook that
+            # checks `if (alen < 0) rollback` explores the failure.
+            neg = xv < z3.BitVecVal(0, 64)   # signed BV compare (z3 default for <)
+            pe = p.clone(); pe.cons.append(neg); pe.stack.append(z3.BitVecVal(FE_INVALID_ARGUMENT & ((1<<64)-1), 64))
+            self._extra_forks.append(pe)
+            p.cons.append(z3.Not(neg))
+            # issued value word = (1<<63) | xfl  (set the is-issued bit), big-endian 8 bytes
+            valword = xv | z3.BitVecVal(1 << XFL_NAN_BIT, 64)
+            cur = [self.load_byte(p, cp + i) for i in range(20)] if cl == 20 else [z3.BitVecVal(0, 8)] * 20
+            iss = [self.load_byte(p, ip + i) for i in range(20)] if il == 20 else [z3.BitVecVal(0, 8)] * 20
+            off = wptr
+            if fieldcode != 0:
+                # field header for sfAmount (type 6 / nth 1) is a single byte 0x61
+                p.mem[off] = z3.BitVecVal(0x61, 8); off += 1
+            # 8-byte big-endian value word
+            for i in range(8):
+                p.mem[off + i] = z3.Extract(8 * (7 - i) + 7, 8 * (7 - i), valword)
+            off += 8
+            for i in range(20):
+                p.mem[off + i] = cur[i]
+            off += 20
+            for i in range(20):
+                p.mem[off + i] = iss[i]
+            off += 20
+            st.append(z3.BitVecVal(off - wptr, 64)); return
+        if name == "etxn_nonce":
+            self.unsupported.add("etxn_nonce"); st.pop(); st.pop()
+            st.append(z3.BitVecVal(32, 64)); return
         if name in ("accept", "rollback"):
             code = conc(st.pop()); st.pop(); st.pop()
             if name == "accept":
                 self.accepts.append((code, list(p.cons)))
                 self.accepts_full.append((code, list(p.cons), dict(p.writes)))
                 self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
+                self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
@@ -290,16 +598,51 @@ class Engine:
         """Extract native drops from an emitted Payment blob (xahc payment template:
         byte0=0x12 TT, Amount field 0x61 at offset 35, 8 drops bytes at 36..43, top
         byte masked 0x3F). Returns BitVec64, or None if the blob isn't this shape —
-        in which case balance proofs must treat the amount as unknown (fail closed)."""
+        in which case balance proofs must treat the amount as unknown (fail closed).
+
+        NOTE: an ISSUED (IOU) emit has bit63 of the Amount value word SET. Native
+        drops do not apply to it, so this returns None for an IOU emit (fail-closed
+        for native-conservation). The IOU value word is captured separately by
+        _emit_iou_xfl for IOU-aware drivers."""
         try:
             if conc(self.load_byte(p, rptr)) != 0x12:
                 return None
             if conc(self.load_byte(p, rptr + 35)) != 0x61:
                 return None
+            # native Amount is an 8-byte value word => the Fee field id (0x68) sits at
+            # offset 44. An issued (48-byte) Amount pushes Fee far later, so a non-0x68
+            # byte at 44 means this is an IOU emit, not native drops -> fail closed.
+            after = self.load_byte(p, rptr + 44)
+            if not self._is_concrete(after) or self._val(after) != 0x68:
+                return None
         except RuntimeError:
             return None
         bs = [self.load_byte(p, rptr + 36 + i) for i in range(8)]
         return z3.Concat(bs[0] & 0x3F, *bs[1:])
+
+    def _emit_iou_xfl(self, p, rptr):
+        """Extract the emitted IOU value as a clean 64-bit XFL (bit63 cleared) from an
+        emitted Payment blob whose Amount field is an issued STAmount (0x61 at offset
+        35, 8-byte value word at 36..43 with bit63 set). Returns (xfl_bv, currency20,
+        issuer20) or None if the blob isn't an issued-amount payment."""
+        try:
+            if conc(self.load_byte(p, rptr)) != 0x12:
+                return None
+            if conc(self.load_byte(p, rptr + 35)) != 0x61:
+                return None
+            # issued (48-byte) Amount => the byte at offset 44 is NOT the Fee field id
+            # (0x68); for a native 8-byte Amount it IS 0x68. So an issued emit is
+            # exactly the case where offset 44 != 0x68.
+            after = self.load_byte(p, rptr + 44)
+            if self._is_concrete(after) and self._val(after) == 0x68:
+                return None  # native, not issued
+        except RuntimeError:
+            return None
+        word = z3.Concat(*[self.load_byte(p, rptr + 36 + i) for i in range(8)])
+        xflv = word & z3.BitVecVal(~(1 << XFL_NAN_BIT) & ((1 << 64) - 1), 64)
+        cur = [self.load_byte(p, rptr + 44 + i) for i in range(20)]
+        iss = [self.load_byte(p, rptr + 64 + i) for i in range(20)]
+        return (xflv, cur, iss)
 
     # ---- the interpreter ----
     def run(self):
@@ -465,11 +808,26 @@ class Engine:
             if op == "call":
                 if ins.imm < len(self.imports):
                     name = self.imports[ins.imm]
+                    self._extra_forks = []  # error-sentinel forks produced by host_call
                     try:
                         self.host_call(name, p)
-                        return [(None, p)]
+                        # the primary path continues; any error-sentinel forks (e.g.
+                        # div-by-zero -> -25, x<0 -> -7) continue as siblings so a hook
+                        # that branches on the negative result is fully explored. A path
+                        # whose constraints just became unsat is pruned by `feasible`.
+                        out = [(None, p)] if feasible(p.cons) else []
+                        for ep in self._extra_forks:
+                            if feasible(ep.cons):
+                                out.append((None, ep))
+                        return out
                     except Terminal:
-                        return []  # accept/rollback recorded; path ends
+                        # primary path took accept/rollback; error-sentinel siblings
+                        # (forked BEFORE the terminal) still need to run.
+                        out = []
+                        for ep in getattr(self, "_extra_forks", []):
+                            if feasible(ep.cons):
+                                out.append((None, ep))
+                        return out
                 return self._call_local(ins.imm - len(self.imports), p)
             if op == "drop":
                 p.stack.pop(); return [(None, p)]

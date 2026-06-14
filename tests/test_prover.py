@@ -12,6 +12,8 @@ from prover import Engine, Path                      # noqa: E402
 from wasm import Instr                                # noqa: E402
 import prove_limit, prove_guardrail, prove_termination, prove_monotonic   # noqa: E402
 import prove_nospend, prove_conservation                                  # noqa: E402
+import prove_limit_iou                                                    # noqa: E402
+import xfl                                                                # noqa: E402
 
 H = os.path.join(ROOT, "hooks")
 ENG = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())  # any module, for method use
@@ -529,6 +531,348 @@ def test_multivalue_blocktype_fails_loud():
     except NotImplementedError:
         raised = True
     assert raised, "multi-value blocktype should fail loud (NotImplementedError)"
+
+
+# =================== XFL / IOU (issued-amount) support ==========================
+
+def test_xfl_known_vectors():
+    # GROUND-TRUTH vectors (ported from xahau-mcp/src/xfl.ts). A wrong constant here
+    # is a wrong money-model -> a possible false PROVEN. Guard the math itself.
+    assert xfl.floatOne() == 6089866696204910592, "float_one() literal wrong"
+    assert xfl.FLOAT_ONE == 6089866696204910592
+    fs = xfl.floatSet(-1, 15)                              # 1.5 = 15 * 10^-1
+    d = xfl.decode(fs)
+    # canonical normalized form of 1.5: mantissa 1.5e15, exponent -15. Reconstructed
+    # value (exact integer math, NO Python float): mant * 10^exp == 1.5.
+    assert d.sign == 1
+    assert d.mant == 1_500_000_000_000_000 and d.exp == -15, f"got mant={d.mant} exp={d.exp}"
+    assert d.mant * 10 ** (d.exp + 15) == 1_500_000_000_000_000  # i.e. value == 1.5
+    # compare flag map: EQ=1, LT=2, GT=4 (HARD-CODED — do not "correct")
+    assert (xfl.EQ_FLAG, xfl.LT_FLAG, xfl.GT_FLAG) == (1, 2, 4)
+    one = xfl.floatOne()
+    assert xfl.floatCompare(fs, one, xfl.GT_FLAG) == 1     # 1.5 > 1.0
+    assert xfl.floatCompare(one, fs, xfl.GT_FLAG) == 0
+    assert xfl.floatCompare(fs, fs, xfl.EQ_FLAG) == 1
+    neg = xfl.floatNegate(fs)
+    assert xfl.decode(neg).sign == -1
+    assert xfl.floatCompare(neg, fs, xfl.LT_FLAG) == 1     # -1.5 < 1.5
+    # error sentinels
+    assert xfl.floatDivide(fs, 0) == -25                  # DIVISION_BY_ZERO
+    assert xfl.floatInt(neg, 0, False) == -33             # CANT_RETURN_NEGATIVE
+    assert xfl.floatInt(fs, 16, False) == -7              # INVALID_ARGUMENT (dp>15)
+    assert xfl.floatInt(fs, 0, False) == 1                # floor(1.5) = 1
+    assert xfl.floatInt(neg, 0, True) == 1                # abs floor = 1
+
+
+def test_xfl_arithmetic_roundtrips():
+    # reconstruct exact value as a scaled integer: value*10^15 (avoids Python float).
+    def val15(x):
+        d = xfl.decode(x)
+        return d.sign * d.mant * 10 ** (d.exp + 15)
+    fs = xfl.floatSet(-1, 15)                              # 1.5
+    two = xfl.floatSet(0, 2)
+    prod = xfl.floatMultiply(fs, two)                     # 3.0
+    assert val15(prod) == 3 * 10 ** 15, f"1.5*2 != 3.0 (got {val15(prod)})"
+    q = xfl.floatDivide(prod, two)                        # 1.5
+    assert val15(q) == 15 * 10 ** 14, f"3/2 != 1.5 (got {val15(q)})"
+    s = xfl.floatSum(fs, fs)                              # 3.0
+    assert val15(s) == 3 * 10 ** 15, f"1.5+1.5 != 3.0 (got {val15(s)})"
+    # multiply sign rule: neg * pos = neg
+    neg = xfl.floatNegate(fs)
+    assert xfl.decode(xfl.floatMultiply(neg, two)).sign == -1
+
+
+def test_float_one_negate_mantissa_sign_models_exact():
+    # ENGINE-level: float_one literal, and the exact bit ops for negate/mantissa/sign
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    e.host_call("float_one", p)
+    assert z3.simplify(p.stack.pop()).as_long() == xfl.FLOAT_ONE
+    # negate of a concrete XFL matches xfl.floatNegate
+    fs = xfl.floatSet(-1, 15)
+    p.stack.append(z3.BitVecVal(fs, 64)); e.host_call("float_negate", p)
+    assert z3.simplify(p.stack.pop()).as_long() == xfl.floatNegate(fs)
+    # mantissa
+    p.stack.append(z3.BitVecVal(fs, 64)); e.host_call("float_mantissa", p)
+    assert z3.simplify(p.stack.pop()).as_long() == xfl.floatMantissa(fs)
+    # sign (1.5 positive -> 0)
+    p.stack.append(z3.BitVecVal(fs, 64)); e.host_call("float_sign", p)
+    assert z3.simplify(p.stack.pop()).as_long() == xfl.floatSign(fs)
+    # negate(zero)==zero
+    p.stack.append(z3.BitVecVal(0, 64)); e.host_call("float_negate", p)
+    assert z3.simplify(p.stack.pop()).as_long() == 0
+
+
+def test_float_compare_model_matches_reference_exhaustively():
+    # The Z3 float_compare model (linear BV, no 10^exp) must agree with xfl.floatCompare
+    # on a spread of concrete XFL pairs, for every mode flag. A disagreement here would
+    # be a wrong ordering = a false PROVEN risk.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    vals = [0,
+            xfl.floatSet(0, 1), xfl.floatSet(0, 2), xfl.floatSet(-1, 15),
+            xfl.floatSet(1, 1), xfl.floatSet(-2, 99),
+            xfl.floatNegate(xfl.floatSet(0, 1)), xfl.floatNegate(xfl.floatSet(-1, 15)),
+            xfl.floatSet(3, 5), xfl.floatNegate(xfl.floatSet(3, 5))]
+    for a in vals:
+        for b in vals:
+            for mode in (1, 2, 4, 3, 5, 6, 7):
+                p = Path()
+                p.stack = [z3.BitVecVal(a, 64), z3.BitVecVal(b, 64), z3.BitVecVal(mode, 64)]
+                e.host_call("float_compare", p)
+                got = z3.simplify(p.stack.pop()).as_long()
+                want = xfl.floatCompare(a, b, mode)
+                assert got == want, f"compare({a},{b},{mode}) model={got} ref={want}"
+
+
+def test_float_set_concrete_folds_symbolic_overapprox():
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    # concrete -> exact literal
+    p = Path(); p.stack = [z3.BitVecVal((-1) & 0xFFFFFFFF, 32), z3.BitVecVal(15, 64)]
+    e.host_call("float_set", p)
+    assert z3.simplify(p.stack.pop()).as_long() == xfl.floatSet(-1, 15)
+    assert "float_set" not in e.float_overapprox, "concrete float_set must NOT over-approx"
+    # symbolic mantissa -> fresh over-approx + flagged
+    p2 = Path(); p2.stack = [z3.BitVecVal(0, 32), z3.BitVec("m", 64)]
+    e.host_call("float_set", p2)
+    assert "float_set" in e.float_overapprox, "symbolic float_set must be over-approximated"
+
+
+def test_float_multiply_divide_symbolic_are_overapprox_and_sound():
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    # symbolic multiply -> over-approx, fresh result, and the two results not unified
+    p = Path(); p.stack = [z3.BitVec("a", 64), z3.BitVec("b", 64)]
+    e.host_call("float_multiply", p)
+    r1 = p.stack.pop()
+    p.stack = [z3.BitVec("c", 64), z3.BitVec("d", 64)]
+    e.host_call("float_multiply", p)
+    r2 = p.stack.pop()
+    assert "float_multiply" in e.float_overapprox
+    s = z3.Solver(); s.add(r1 != r2)
+    assert s.check() == z3.sat, "two over-approx multiply results wrongly unified"
+    # symbolic divide forks a div-by-zero (-25) sentinel sibling
+    e2 = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    e2._extra_forks = []
+    p2 = Path(); p2.stack = [z3.BitVec("x", 64), z3.BitVec("y", 64)]
+    e2.host_call("float_divide", p2)
+    assert "float_divide" in e2.float_overapprox
+    assert len(e2._extra_forks) == 1, "divide must fork a div-by-zero sentinel path"
+    sib = e2._extra_forks[0]
+    assert z3.simplify(sib.stack[-1]).as_long() == (xfl.DIVISION_BY_ZERO & ((1 << 64) - 1))
+
+
+def test_float_log_root_are_unsupported():
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path(); p.stack = [z3.BitVec("x", 64)]
+    e.host_call("float_log", p)
+    assert "float_log" in e.unsupported
+    p.stack = [z3.BitVec("x", 64), z3.BitVecVal(2, 32)]
+    e.host_call("float_root", p)
+    assert "float_root" in e.unsupported
+
+
+def test_iou_sfamount_48byte_path_and_native_untouched():
+    # 48-byte read -> issued layout exposes amt_xfl + amt48; 8-byte read stays native.
+    e = Engine(open(os.path.join(H, "limit_iou.wasm"), "rb").read())
+    e.run()
+    assert "amt_xfl" in e.inputs, "48-byte issued sfAmount did not expose amt_xfl"
+    assert "amt48" in e.inputs and len(e.inputs["amt48"]) == 48
+    # native limit hook must still use the 8-byte path (no IOU drift)
+    en = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    en.run()
+    assert "amt" in en.inputs and len(en.inputs["amt"]) == 8
+    assert "amt_xfl" not in en.inputs, "native sfAmount wrongly promoted to issued"
+
+
+def test_iou_matrix_verdicts():
+    # The 4 IOU fixtures and their REQUIRED verdicts.
+    assert prove_limit_iou.main(os.path.join(H, "limit_iou.wasm")) == 0          # PROVEN
+    assert prove_limit_iou.main(os.path.join(H, "limit_iou_inverted.wasm")) == 2  # CEX
+    assert prove_conservation.main(os.path.join(H, "emit_iou.wasm")) == 0         # clean PROVEN
+    # CRITICAL: a symbolic float_multiply into an emit must be INCONCLUSIVE, never PROVEN.
+    rc = prove_conservation.main(os.path.join(H, "iou_multiply_bug.wasm"))
+    assert rc == 3, f"iou_multiply_bug MUST be INCONCLUSIVE(3), got {rc} — model UNSOUND if 0!"
+    assert rc != 0, "FATAL: symbolic float op reached a PROVEN (false proof)"
+
+
+def test_no_symbolic_float_op_ever_reaches_proven():
+    # SOUNDNESS GUARANTEE: for the over-approx fixture, float_overapprox is non-empty
+    # AND the conservation driver refuses PROVEN. Assert the invariant directly.
+    e = Engine(open(os.path.join(H, "iou_multiply_bug.wasm"), "rb").read())
+    e.run()
+    assert e.float_overapprox, "over-approx not recorded for symbolic multiply"
+    # any accepting path that emits an over-approx IOU must force INCONCLUSIVE
+    rc = prove_conservation.main(os.path.join(H, "iou_multiply_bug.wasm"))
+    assert rc == 3
+
+
+def _norm_xfl_sample():
+    """A dense, boundary-heavy sample of *normalized* XFL int64 values: both signs,
+    exponent min/max (-96..80), mantissa boundaries (1e15, 1e16-1), zero, and
+    equal-magnitude-opposite-sign pairs."""
+    vals = {0}
+    mants = [xfl.MIN_MANT, xfl.MIN_MANT + 1, 1_234_567_890_123_456,
+             5_000_000_000_000_000, 9_999_999_999_999_998, xfl.MAX_MANT - 1]
+    exps = [-96, -80, -50, -1, 0, 1, 23, 50, 79, 80]
+    for s in (1, -1):
+        for m in mants:
+            for e in exps:
+                v = xfl.encode(s, m, e)
+                if v > 0:
+                    vals.add(v)
+    return sorted(vals)
+
+
+def test_float_compare_cross_check_dense_normalized():
+    """ADVERSARIAL CROSS-CHECK: the Z3 _float_cmp_c model must equal xfl.floatCmp AND
+    the float_compare host model must equal xfl.floatCompare on a LARGE normalized
+    sample (both signs, exponent + mantissa boundaries, zero, equal-mag opposite-sign),
+    for ALL 7 non-zero mode flags. A single disagreement here is a wrong ordering =
+    a false-PROVEN risk. This is the highest-risk surface; keep it dense."""
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    cmpc = e._float_cmp_c
+    vals = _norm_xfl_sample()
+    assert len(vals) >= 80, f"sample too small: {len(vals)}"
+    checked = 0
+    for a in vals:
+        for b in vals:
+            cm = z3.simplify(cmpc(z3.BitVecVal(a, 64), z3.BitVecVal(b, 64))).as_signed_long()
+            cr = xfl.floatCmp(a, b)
+            assert cm == cr, f"cmp({a},{b}) model={cm} ref={cr}"
+            for mode in (1, 2, 3, 4, 5, 6, 7):
+                tm = 1 if (((mode & 1) and cm == 0) or ((mode & 2) and cm < 0)
+                           or ((mode & 4) and cm > 0)) else 0
+                tr = xfl.floatCompare(a, b, mode)
+                assert tm == tr, f"compare({a},{b},{mode}) model={tm} ref={tr}"
+                checked += 1
+    assert checked >= 45000, f"expected dense coverage, only {checked} pairs*modes"
+
+
+def test_float_compare_sign_zero_edges_match_reference():
+    """Explicit sign/zero edge cases in the Z3 model (Attack 5): negative vs positive,
+    negative vs negative (reversed ordering), zero vs positive, zero vs negative,
+    equal magnitude opposite sign. Each must match xfl.floatCmp."""
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    cmpc = e._float_cmp_c
+    p5, n5, p100, n100 = (xfl.floatSet(0, 5), xfl.floatNegate(xfl.floatSet(0, 5)),
+                          xfl.floatSet(0, 100), xfl.floatNegate(xfl.floatSet(0, 100)))
+    cases = [(n5, p100), (p100, n5), (n5, n100), (n100, n5),
+             (0, n5), (0, p5), (p5, n5), (n5, p5), (0, 0)]
+    for a, b in cases:
+        cm = z3.simplify(cmpc(z3.BitVecVal(a, 64), z3.BitVecVal(b, 64))).as_signed_long()
+        assert cm == xfl.floatCmp(a, b), f"sign/zero edge cmp({a},{b}) model={cm} ref={xfl.floatCmp(a,b)}"
+
+
+def test_denormal_zero_mantissa_excluded_by_normalization_guard():
+    """KNOWN BOUNDARY: the lexicographic (exp-first) magnitude compare diverges from
+    true magnitude ONLY for a non-canonical XFL whose mantissa field is 0 but whose
+    word is non-zero (a denormal the host never produces). The _float_normalized guard
+    MUST exclude it, so it can never manufacture or suppress a counterexample. This
+    test pins that the guard rejects such a value (fail-closed)."""
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    denormal = (1 << 62) | (97 << 54) | 0          # positive, exp 0, mantissa-field 0, word != 0
+    assert denormal != 0
+    s = z3.Solver(); s.add(e._float_normalized(z3.BitVecVal(denormal, 64)))
+    assert s.check() == z3.unsat, "denormal zero-mantissa XFL must NOT satisfy _float_normalized"
+    # and that this is the kind of value that diverges (documents the boundary):
+    tiny = xfl.encode(1, xfl.MIN_MANT, -96)
+    assert xfl.floatCmp(tiny, denormal) != z3.simplify(
+        e._float_cmp_c(z3.BitVecVal(tiny, 64), z3.BitVecVal(denormal, 64))).as_signed_long(), \
+        "expected the documented denormal divergence (guard is what makes it safe)"
+
+
+def test_float_compare_model_antisymmetric_on_normalized():
+    """The Z3 compare must be antisymmetric for all normalized symbolic XFLs:
+    c(a,b) == -c(b,a). A break would mean an order-dependent (unsound) comparison."""
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    a, b = z3.BitVec("a", 64), z3.BitVec("b", 64)
+    s = z3.Solver()
+    s.add(e._float_normalized(a), e._float_normalized(b))
+    s.add(e._float_cmp_c(a, b) != -e._float_cmp_c(b, a))
+    assert s.check() == z3.unsat, "model float compare is not antisymmetric"
+
+
+def test_overapprox_taint_persists_through_float_sto_laundering():
+    """ATTACK 2: launder a symbolic (over-approximated) float result through float_sto
+    into memory. The taint flag MUST persist AND the stored bytes must remain symbolic
+    (a function of the over-approx result), so a driver re-reading them cannot vacuously
+    prove anything. Defeating taint here would be a false-PROVEN vector."""
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path(); p.stack = [z3.BitVec("a", 64), z3.BitVec("b", 64)]
+    e.host_call("float_multiply", p)
+    res = p.stack.pop()
+    assert "float_multiply" in e.float_overapprox
+    e._extra_forks = []
+    p.stack = [z3.BitVecVal(0, 64), z3.BitVecVal(48, 64), z3.BitVecVal(0, 64),
+               z3.BitVecVal(0, 64), z3.BitVecVal(0, 64), z3.BitVecVal(0, 64),
+               res, z3.BitVecVal(0, 64)]
+    e.host_call("float_sto", p)
+    assert "float_multiply" in e.float_overapprox, "taint cleared by float_sto laundering!"
+    word = z3.Concat(*[e.load_byte(p, i) for i in range(8)])   # fieldcode 0 -> value at 0..7
+    assert not z3.is_bv_value(z3.simplify(word)), "laundered word became concrete (taint lost)"
+    # the stored word is exactly the over-approx result with the is-issued bit set
+    s = z3.Solver(); s.add(word != (res | z3.BitVecVal(1 << 63, 64)))
+    assert s.check() == z3.unsat, "stored word is not the symbolic over-approx result"
+
+
+def test_error_sentinel_forks_explore_both_paths():
+    """ATTACK 3: every symbolic float error fork must create a sibling carrying the
+    correct sentinel under the error condition, while the main path carries its
+    negation — so a hook's `if (r < 0) rollback` reject path is NEVER silently dropped
+    (dropping it = false PROVEN for the inverse invariant)."""
+    def fresh():
+        en = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+        en._extra_forks = []
+        return en
+    # divide: den==0 -> -25 ; partition is exact
+    e = fresh(); p = Path(); p.stack = [z3.BitVec("x", 64), z3.BitVec("y", 64)]
+    e.host_call("float_divide", p)
+    assert len(e._extra_forks) == 1
+    assert z3.simplify(e._extra_forks[0].stack[-1]).as_signed_long() == xfl.DIVISION_BY_ZERO
+    sib = e._extra_forks[0]
+    s = z3.Solver(); s.add(*sib.cons); s.add(z3.BitVec("y", 64) != 0)
+    assert s.check() == z3.unsat, "divide sentinel sibling does not force divisor==0"
+    s = z3.Solver(); s.add(*p.cons); s.add(z3.BitVec("y", 64) == 0)
+    assert s.check() == z3.unsat, "divide main path does not force divisor!=0"
+    # int: negative input (absflag 0) -> -33
+    e = fresh(); p = Path()
+    p.stack = [z3.BitVec("x", 64), z3.BitVecVal(2, 64), z3.BitVecVal(0, 64)]
+    e.host_call("float_int", p)
+    assert len(e._extra_forks) == 1
+    assert z3.simplify(e._extra_forks[0].stack[-1]).as_signed_long() == xfl.CANT_RETURN_NEGATIVE
+    # sto: x<0 -> -7
+    e = fresh(); p = Path()
+    p.stack = [z3.BitVecVal(0, 64), z3.BitVecVal(48, 64), z3.BitVecVal(0, 64),
+               z3.BitVecVal(0, 64), z3.BitVecVal(0, 64), z3.BitVecVal(0, 64),
+               z3.BitVec("xv", 64), z3.BitVecVal(0, 64)]
+    e.host_call("float_sto", p)
+    assert len(e._extra_forks) == 1
+    assert z3.simplify(e._extra_forks[0].stack[-1]).as_signed_long() == xfl.INVALID_ARGUMENT
+    # invert: x==0 -> -25
+    e = fresh(); p = Path(); p.stack = [z3.BitVec("x", 64)]
+    e.host_call("float_invert", p)
+    assert len(e._extra_forks) == 1
+    assert z3.simplify(e._extra_forks[0].stack[-1]).as_signed_long() == xfl.DIVISION_BY_ZERO
+
+
+def test_limit_iou_proven_is_non_vacuous():
+    """ATTACK 4: the limit_iou PROVEN must be NON-VACUOUS — there is a real accept path
+    reachable with an under-limit amount, a real rollback path reachable with an
+    over-limit amount, and the accept path is provably UNSAT with an over-limit amount."""
+    e = Engine(open(os.path.join(H, "limit_iou.wasm"), "rb").read())
+    e.run()
+    assert len(e.accepts) >= 1 and len(e.rollbacks) >= 1
+    amtx = e.inputs["amt_xfl"]
+    limx = z3.Concat(*e.inputs["param:LIM"][:8]) & z3.BitVecVal(0x7FFFFFFFFFFFFFFF, 64)
+    GT = z3.BitVecVal(1, 8); LT = z3.BitVecVal(-1, 8)
+    nm = lambda: (e._float_normalized(amtx), e._float_normalized(limx))
+    for _, cons in e.accepts:
+        s = z3.Solver(); s.add(*cons, *nm()); s.add(e._float_cmp_c(amtx, limx) == LT)
+        assert s.check() == z3.sat, "accept path unreachable with under-limit amount (vacuous)"
+        s = z3.Solver(); s.add(*cons, *nm()); s.add(e._float_cmp_c(amtx, limx) == GT)
+        assert s.check() == z3.unsat, "accept path reachable with OVER-limit amount (UNSOUND)"
+    for _, cons in e.rollbacks:
+        s = z3.Solver(); s.add(*cons, *nm()); s.add(e._float_cmp_c(amtx, limx) == GT)
+        assert s.check() == z3.sat, "rollback path unreachable with over-limit amount"
 
 
 if __name__ == "__main__":

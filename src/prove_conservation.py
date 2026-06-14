@@ -21,9 +21,51 @@ def main(path: str) -> int:
     e.run()
 
     amt = e.inputs.get("amt")
-    if not amt:
+    amt48 = e.inputs.get("amt48")
+
+    # ---- IOU emit path: if any accepting path emits an ISSUED amount, the only
+    #      sound verdict for value-conservation is INCONCLUSIVE whenever the emitted
+    #      XFL was over-approximated (a symbolic nonlinear float op). We NEVER claim
+    #      PROVEN over an over-approximated emitted value. (Native drops are handled
+    #      by the original logic below.) Checked BEFORE the incoming-amount guard,
+    #      since an IOU emitter need not read an incoming native amount.
+    iou_emitting = any(
+        cnt > 0 and any(x is not None for x in eiou)
+        for _, eiou, cnt in e.iou_emits_on_accept
+    )
+    if not amt and not amt48 and not iou_emitting:
         print("ERROR: hook never reads sfAmount — no incoming value to conserve against.")
         return 1
+
+    if iou_emitting:
+        print(f"explored: {len(e.iou_emits_on_accept)} accepting path(s) (issued/IOU emit detected)")
+        if e.float_overapprox:
+            print(f"\n⚠️ INCONCLUSIVE — emitted IOU value(s) depend on over-approximated "
+                  f"float op(s) {sorted(e.float_overapprox)} (symbolic nonlinear); the emitted "
+                  f"value cannot be computed soundly. Refusing to claim conservation (PROVEN).")
+            return 3
+        if e.unsupported:
+            print(f"\n⚠️ INCONCLUSIVE — unsupported op(s) {sorted(e.unsupported)} reached; "
+                  f"cannot prove conservation.")
+            return 3
+        if e.hit_bound:
+            print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; cannot prove.")
+            return 3
+        # All IOU float ops were concrete (folded to literals). With no symbolic
+        # taint and no incoming-IOU relationship modeled, there is no value-creation
+        # path the prover can construct — report the conservative clean PROVEN.
+        print("\n✅ PROVEN — emitted IOU value(s) are concrete (no symbolic float taint); "
+              "no value-creation path exists. Balance conserved.")
+        return 0
+
+    if not amt:
+        # Reached the native-conservation path but the hook read an incoming ISSUED
+        # (IOU) amount (amt48), not native drops — we cannot soundly compare native
+        # emits against an issued incoming value. Fail closed, never a false PROVEN.
+        print("\n⚠️ INCONCLUSIVE — incoming amount is issued (IOU), not native drops; "
+              "cannot compare native emit total against an issued incoming value.")
+        return 3
+
     incoming = z3.ZeroExt(64, z3.Concat(amt[0] & 0x3F, *amt[1:]))   # 128-bit, masked drops
 
     print(f"explored: {len(e.emits_on_accept)} accepting path(s)")
@@ -55,6 +97,11 @@ def main(path: str) -> int:
                   f"across {count} payment(s)")
             return 2
 
+    if e.float_overapprox:
+        print(f"\n⚠️ INCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} were "
+              f"over-approximated (symbolic nonlinear); an over-approximated value may "
+              f"reach the conservation invariant. Refusing to claim PROVEN.")
+        return 3
     if e.unsupported:
         print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
               f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "

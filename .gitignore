@@ -1,4 +1,5 @@
 .venv/
+.letta/
 __pycache__/
 *.pyc
 hooks/*.raw.wasm
