@@ -35,7 +35,8 @@ class Terminal(Exception):
 
 
 class Path:
-    __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes")
+    __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
+                 "emit_count", "emits")
 
     def __init__(self):
         self.stack: list = []
@@ -45,6 +46,8 @@ class Path:
         self.cons: list = []    # path constraints (z3 Bool)
         self.guards: dict = {}  # guard id -> crossings so far on this path
         self.writes: dict = {}  # state key (str) -> last value written (BitVec) on this path
+        self.emit_count: int = 0  # number of emit() calls on this path
+        self.emits: list = []     # emitted native drops (BitVec64) or None if unparseable
 
     def clone(self) -> "Path":
         p = Path()
@@ -55,6 +58,8 @@ class Path:
         p.cons = list(self.cons)
         p.guards = dict(self.guards)
         p.writes = dict(self.writes)
+        p.emit_count = self.emit_count
+        p.emits = list(self.emits)
         return p
 
 
@@ -73,6 +78,7 @@ class Engine:
         self.rollbacks: list = []    # (code, cons)
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
+        self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.hook = next(f for f in self.funcs if f.name == "hook")
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
@@ -80,6 +86,7 @@ class Engine:
         # PROVEN — deeper iterations were not explored.
         self.hit_bound = False
         self._undef = 0              # counter for fresh uninitialized-memory bytes
+        self._depth = 0              # call-inlining depth (recursion guard)
 
     def fresh_bytes(self, name: str, n: int):
         bs = [z3.BitVec(f"{name}_{i}", 8) for i in range(n)]
@@ -191,15 +198,78 @@ class Engine:
             vbytes = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian value
             p.writes[kn] = z3.Concat(*vbytes) if n > 1 else vbytes[0]
             st.append(z3.BitVecVal(n, 64)); return
+        # ---- emitted-transaction host fns (for balance / double-spend invariants) ----
+        if name == "ledger_seq":
+            st.append(z3.BitVecVal(1000, 64)); return
+        if name == "etxn_reserve":
+            n = st.pop(); st.append(z3.BitVecVal(1, 64)); return     # success
+        if name == "etxn_details":
+            wlen = conc(st.pop()); wptr = conc(st.pop())
+            n = min(wlen, 138)                                       # emit-details blob
+            for i in range(n):
+                p.mem[wptr + i] = z3.BitVecVal(0, 8)
+            st.append(z3.BitVecVal(n, 64)); return
+        if name == "etxn_fee_base":
+            st.pop(); st.pop(); st.append(z3.BitVecVal(10, 64)); return  # small positive fee
+        if name == "emit":
+            rlen = conc(st.pop()); rptr = conc(st.pop()); st.pop(); st.pop()
+            p.emit_count += 1
+            p.emits.append(self._emit_drops(p, rptr))
+            st.append(z3.BitVecVal(32, 64)); return                 # >=0 = emitted hash len
         if name in ("accept", "rollback"):
             code = conc(st.pop()); st.pop(); st.pop()
             if name == "accept":
                 self.accepts.append((code, list(p.cons)))
                 self.accepts_full.append((code, list(p.cons), dict(p.writes)))
+                self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
         raise NotImplementedError(f"host fn {name} not modeled")
+
+    def _call_local(self, local_idx, p):
+        """Inline a call to a DEFINED (local) function. WASM is non-recursive in
+        practice for hooks, so we execute the callee's body in a fresh frame that
+        shares memory/globals/path-constraints/guards with the caller. The callee
+        may fork (multiple return paths); each becomes a caller continuation with
+        the callee's result value(s) pushed. A depth cap fails loud on recursion."""
+        func = self.funcs[local_idx]
+        self._depth += 1
+        if self._depth > 256:
+            raise NotImplementedError("call depth > 256 — recursion not supported (fails loud)")
+        try:
+            npar = func.nparams
+            args = [p.stack.pop() for _ in range(npar)][::-1]
+            saved_locals = p.locals
+            saved_stack = list(p.stack)
+            wbits = lambda vt: 64 if vt in (0x7E, 0x7C) else 32
+            p.locals = list(args) + [z3.BitVecVal(0, wbits(vt)) for vt in func.localtypes]
+            p.stack = []
+            out = []
+            for _sig, rp in self._exec_seq(func.body, [p]):
+                # any escaping signal (fall-through None / return / br past body) = function return
+                retvals = rp.stack[-func.nresults:] if func.nresults else []
+                rp.locals = list(saved_locals)
+                rp.stack = list(saved_stack) + retvals
+                out.append((None, rp))
+            return out
+        finally:
+            self._depth -= 1
+
+    def _emit_drops(self, p, rptr):
+        """Extract native drops from an emitted Payment blob (xahc payment template:
+        byte0=0x12 TT, Amount field 0x61 at offset 35, 8 drops bytes at 36..43, top
+        byte masked 0x3F). Returns BitVec64, or None if the blob isn't this shape —
+        in which case balance proofs must treat the amount as unknown (fail closed)."""
+        try:
+            if conc(self.load_byte(p, rptr)) != 0x12:
+                return None
+            if conc(self.load_byte(p, rptr + 35)) != 0x61:
+                return None
+        except RuntimeError:
+            return None
+        bs = [self.load_byte(p, rptr + 36 + i) for i in range(8)]
+        return z3.Concat(bs[0] & 0x3F, *bs[1:])
 
     # ---- the interpreter ----
     def run(self):
@@ -331,14 +401,14 @@ class Engine:
             if op in ("unreachable", "nop"):
                 return [] if op == "unreachable" else [(None, p)]
             if op == "call":
-                name = self.imports[ins.imm] if ins.imm < len(self.imports) else None
-                if name is None:
-                    raise NotImplementedError("local function calls not yet inlined")
-                try:
-                    self.host_call(name, p)
-                    return [(None, p)]
-                except Terminal:
-                    return []  # accept/rollback recorded; path ends
+                if ins.imm < len(self.imports):
+                    name = self.imports[ins.imm]
+                    try:
+                        self.host_call(name, p)
+                        return [(None, p)]
+                    except Terminal:
+                        return []  # accept/rollback recorded; path ends
+                return self._call_local(ins.imm - len(self.imports), p)
             if op == "drop":
                 p.stack.pop(); return [(None, p)]
             if op == "select":

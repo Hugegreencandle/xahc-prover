@@ -123,6 +123,28 @@ python src/prove_monotonic.py hooks/monotonic_bug.wasm
 #    written = 0   prior = 1      (the missing strictly-increasing check)
 ```
 
+### Emitted-value invariants — no-double-spend & balance conservation
+
+Hooks can *emit* their own transactions. Two distinct ways that goes wrong, two
+invariants — and they're orthogonal (the engine extracts the native amount from
+each emitted Payment blob and counts the emits per path):
+
+```sh
+python src/prove_nospend.py hooks/emit_double.wasm
+# ❌ COUNTEREXAMPLE — an accepting path emits 2 payments (policy allows 1)
+
+python src/prove_conservation.py hooks/emit_inflate.wasm
+# ❌ COUNTEREXAMPLE — emits MORE than it received (value creation):
+#    incoming = 130496 drops   emitted total = 1130496 drops
+```
+
+A forwarder that emits two half-payments **conserves value but double-spends**;
+one that emits `incoming + X` **spends once but mints value**. Each invariant
+catches exactly one and clears the other — `emit_double` passes conservation,
+`emit_inflate` passes no-double-spend. Reaching the emit sites needs the engine to
+**inline local function calls** (clang outlines a repeated `emit` builder at `-O2`);
+that inliner is now in, with a depth cap that fails loud on recursion.
+
 ## Built into `xahc`
 
 The prover is wired into the toolchain — one command from source, CI-friendly exit
@@ -130,9 +152,11 @@ codes (`0` PROVEN, `2` COUNTEREXAMPLE, `3` INCONCLUSIVE):
 
 ```sh
 xahc prove myhook.c --invariant termination     # builds .c, then proves
-xahc prove myhook.wasm --invariant monotonic
+xahc prove myhook.wasm --invariant conservation
 xahc prove limit.wasm --invariant limit -- 600000000000000000   # forward args after --
 ```
+
+Invariants: `limit` · `guardrail` · `termination` · `monotonic` · `nospend` · `conservation`.
 
 `xahc prove` locates the prover via `$XAHC_PROVER_DIR` (or a sibling checkout) and
 runs it against the built WASM.
@@ -203,17 +227,18 @@ in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
-Proves four invariants — **spend-limit**, **destination-allowlist**,
-**guard-termination** (no `GUARD_VIOLATION` for any input), and **state-monotonicity**
-(persisted values never move backwards) — on real compiled WASM including the
-**`agent_guardrail`** deployed on testnet. Not a mock. Every proof is falsifiable:
-buggy variants yield concrete attack txns. Wired into `xahc prove`.
+Proves six invariants — **spend-limit**, **destination-allowlist**,
+**guard-termination** (no `GUARD_VIOLATION`), **state-monotonicity** (persisted
+values never move backwards), **no-double-spend** (bounded emit count), and
+**balance-conservation** (emits ≤ received) — on real compiled WASM including the
+**`agent_guardrail`** deployed on testnet. Multi-function hooks supported via
+local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
+concrete attack txns. Wired into `xahc prove`.
 
 Roadmap:
-- more invariants: no-double-spend across emitted txns, balance conservation
-- multi-function hooks via local-call inlining (the guardrail inlines to one fn at
-  `-O2`; larger hooks will need explicit inlining)
+- more invariants: balance conservation across IOU/issued amounts, state-machine safety
 - an invariant DSL so you write the property in one line
+- `call_indirect` / function-table support
 
 Not audited. The spec you prove is only as good as the invariant you state.
 

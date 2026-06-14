@@ -72,6 +72,7 @@ class Func:
     body: list
     localtypes: list = field(default_factory=list)  # valtype byte per declared local
     paramtypes: list = field(default_factory=list)   # valtype byte per param
+    nresults: int = 0       # number of result values the function returns
 
 
 # opcode -> (mnemonic, immediate-kind)
@@ -240,9 +241,10 @@ def parse(wasm: bytes):
                     nlocals += cnt
                     localtypes += [vt] * cnt
                 body, _ = _decode_seq(r)
-                tparams, _ = type_sigs[func_type_idx[fi]]
+                tparams, tresults = type_sigs[func_type_idx[fi]]
                 code_funcs.append(Func(name="?", nparams=len(tparams), nlocals=nlocals,
-                                       body=body, localtypes=localtypes, paramtypes=list(tparams)))
+                                       body=body, localtypes=localtypes, paramtypes=list(tparams),
+                                       nresults=len(tresults)))
                 r.i = fend
         elif sid == 11:  # data — active segments seed initial memory
             n = r.uleb()

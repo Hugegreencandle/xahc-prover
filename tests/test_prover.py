@@ -8,6 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 from prover import Engine, Path                      # noqa: E402
 import prove_limit, prove_guardrail, prove_termination, prove_monotonic   # noqa: E402
+import prove_nospend, prove_conservation                                  # noqa: E402
 
 H = os.path.join(ROOT, "hooks")
 ENG = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())  # any module, for method use
@@ -56,6 +57,12 @@ def test_matrix_verdicts():
     # state-monotonicity
     assert prove_monotonic.main(os.path.join(H, "monotonic.wasm")) == 0           # strictly-increasing -> PROVEN
     assert prove_monotonic.main(os.path.join(H, "monotonic_bug.wasm")) == 2       # no check -> CEX (replay)
+    # emitted-tx invariants (exercise call inlining + emit modeling)
+    assert prove_nospend.main(os.path.join(H, "emit_forward.wasm")) == 0          # 1 emit -> PROVEN
+    assert prove_nospend.main(os.path.join(H, "emit_double.wasm")) == 2           # 2 emits -> CEX
+    assert prove_conservation.main(os.path.join(H, "emit_forward.wasm")) == 0     # half <= in -> PROVEN
+    assert prove_conservation.main(os.path.join(H, "emit_double.wasm")) == 0      # half+half = in -> PROVEN
+    assert prove_conservation.main(os.path.join(H, "emit_inflate.wasm")) == 2     # > in -> CEX
 
 
 def test_decoder_tracks_types():
