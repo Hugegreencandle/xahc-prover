@@ -56,12 +56,31 @@ python src/prove_guardrail.py hooks/agent_guardrail.wasm
 
 This is the **actual `agent_guardrail` hook** deployed on Xahau testnet — multiple
 guarded loops (the 20-byte outgoing-account check), the `otxn_type`/incoming
-branches, **and the optional destination lock (`hook_param(DST)==20`, genuinely
-explored)** — symbolically executed across every path and proven. Flip one comparison and the prover hands back the attack transaction:
+branches, and the optional destination lock — symbolically executed across every
+path. **Two independent invariants are proven at once:**
+
+```
+✅ PROVEN [spend-limit] — never accepts an outgoing payment over LIM.
+✅ PROVEN [dst-lock]    — when a DST policy is set, an accepted outgoing payment
+                          goes only to the allowed account.
+```
+
+Flip one comparison and the prover hands back the attack transaction:
 
 ```sh
 python src/prove_guardrail.py hooks/agent_guardrail_buggy.wasm 600000000000000000
-# ❌ COUNTEREXAMPLE — guardrail ACCEPTS an over-limit OUTGOING payment: drops=… > LIM=15
+# ❌ COUNTEREXAMPLE [spend-limit] — ACCEPTS an over-limit OUTGOING payment: drops=… > LIM=15
+```
+
+The dst-lock proof is not decorative — it catches a **one-character off-by-one**.
+A variant whose check loops `i < 19` instead of `i < 20` leaves the destination's
+last byte unchecked; a test would only notice if it happened to send to an account
+matching in *exactly* 19 bytes. The prover finds it for every input:
+
+```sh
+python src/prove_guardrail.py hooks/agent_guardrail_dstbug.wasm
+# ❌ COUNTEREXAMPLE [dst-lock] — ACCEPTS a payment to a non-allowed destination:
+#    Destination=…FF  allowed(DST)=…00      (differs only in byte 19, the unchecked one)
 ```
 
 ### Verified on-chain
@@ -125,13 +144,14 @@ in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
-Proves the **spend-limit** invariant — including on the **real `agent_guardrail`**
-(loops, branches, optional destination lock), the hook actually deployed on testnet.
-Real symbolic execution of compiled WASM, not a mock.
+Proves two invariants — **spend-limit** and **destination-allowlist** — on the
+**real `agent_guardrail`** (loops, branches, the optional `hook_param(DST)` lock),
+the hook actually deployed on testnet. Real symbolic execution of compiled WASM,
+not a mock. Both proofs are falsifiable: buggy variants yield concrete attack txns.
 
 Roadmap:
-- more invariants: destination allowlist (prove `DST` lock holds), state
-  monotonicity, **guard-termination** (prove no `GUARD_VIOLATION` for any input)
+- more invariants: state monotonicity, **guard-termination** (prove no
+  `GUARD_VIOLATION` for any input)
 - multi-function hooks via local-call inlining (the guardrail inlines to one fn at
   `-O2`; larger hooks will need explicit inlining)
 - an invariant DSL so you write the property in one line

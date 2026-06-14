@@ -47,8 +47,9 @@ def test_matrix_verdicts():
     assert prove_limit.main(os.path.join(H, "limit.wasm")) == 0            # PROVEN
     assert prove_limit.main(os.path.join(H, "limit_buggy.wasm")) == 2      # CEX (signed)
     assert prove_limit.main(os.path.join(H, "limit_inverted.wasm"), SUPPLY) == 2
-    assert prove_guardrail.main(os.path.join(H, "agent_guardrail.wasm")) == 0       # PROVEN
-    assert prove_guardrail.main(os.path.join(H, "agent_guardrail_buggy.wasm"), SUPPLY) == 2
+    assert prove_guardrail.main(os.path.join(H, "agent_guardrail.wasm")) == 0       # both invariants PROVEN
+    assert prove_guardrail.main(os.path.join(H, "agent_guardrail_buggy.wasm"), SUPPLY) == 2   # spend-limit CEX
+    assert prove_guardrail.main(os.path.join(H, "agent_guardrail_dstbug.wasm")) == 2          # dst-lock CEX (off-by-one)
 
 
 def test_decoder_tracks_types():

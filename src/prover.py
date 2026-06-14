@@ -149,7 +149,9 @@ class Engine:
             # SOUND: the host's return (param length, or negative if absent) is
             # SYMBOLIC, so every length-gated branch — e.g. the guardrail's
             # `hook_param(DST) == 20` destination lock — is actually explored.
-            st.append(z3.BitVec(f"hook_param_ret:{kn}", 64)); return
+            ret = z3.BitVec(f"hook_param_ret:{kn}", 64)
+            self.inputs[f"hook_param_ret:{kn}"] = ret    # expose for invariant scoping
+            st.append(ret); return
         if name in ("accept", "rollback"):
             code = conc(st.pop()); st.pop(); st.pop()
             (self.accepts if name == "accept" else self.rollbacks).append((code, list(p.cons)))

@@ -37,6 +37,8 @@ def main(path: str, max_drops: int | None = None) -> int:
     if max_drops is not None:
         print(f"(restricting to reachable inputs: drops <= {max_drops})")
 
+    # ── invariant 1: spend-limit ───────────────────────────────────────────
+    #   (accept AND outgoing Payment)  =>  drops <= LIM
     for code, cons in e.accepts:
         s = z3.Solver()
         s.add(*cons)
@@ -51,16 +53,45 @@ def main(path: str, max_drops: int | None = None) -> int:
             lv = bytes(ev(b) for b in lim)
             dv = ((av[0] & 0x3F) << 56) | int.from_bytes(av[1:], "big")
             lvv = int.from_bytes(lv, "big")
-            print("\n❌ COUNTEREXAMPLE — guardrail ACCEPTS an over-limit OUTGOING payment:")
+            print("\n❌ COUNTEREXAMPLE [spend-limit] — guardrail ACCEPTS an over-limit OUTGOING payment:")
             print(f"   accept code {code}: drops={dv} > LIM={lvv}")
             print(f"   sfAmount bytes = {av.hex().upper()}   LIM = {lv.hex().upper()}")
             return 2
+
+    # ── invariant 2: destination allowlist (the DST lock) ───────────────────
+    #   (accept AND outgoing Payment AND DST policy set)  =>  dest == allowed
+    # The host return for hook_param(DST) is symbolic; ==20 means a 20-byte
+    # account policy is present. We prove the lock can't be bypassed.
+    dest = e.inputs.get("dest")
+    allowed = e.inputs.get("param:DST")
+    dst_ret = e.inputs.get("hook_param_ret:DST")
+    if dest and allowed and dst_ret is not None:
+        dest_mismatch = z3.Or(*[dest[i] != allowed[i] for i in range(20)])
+        for code, cons in e.accepts:
+            s = z3.Solver()
+            s.add(*cons)
+            s.add(is_payment, is_outgoing)              # an OUTGOING PAYMENT
+            s.add(dst_ret == 20)                        # ...with a DST policy set
+            s.add(dest_mismatch)                        # ...to a NON-allowed destination
+            if s.check() == z3.sat:
+                m = s.model()
+                ev = lambda b: m.eval(b, model_completion=True).as_long()
+                dv = bytes(ev(b) for b in dest)
+                lvv = bytes(ev(b) for b in allowed)
+                print("\n❌ COUNTEREXAMPLE [dst-lock] — guardrail ACCEPTS a payment to a non-allowed destination:")
+                print(f"   accept code {code}: Destination={dv.hex().upper()}  allowed(DST)={lvv.hex().upper()}")
+                return 2
+        dst_proven = True
+    else:
+        dst_proven = False   # hook reads no DST param — lock invariant N/A
 
     if e.hit_bound:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
         return 3
 
-    print("\n✅ PROVEN — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.")
+    print("\n✅ PROVEN [spend-limit] — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.")
+    if dst_proven:
+        print("✅ PROVEN [dst-lock]   — for ALL inputs, when a DST policy is set, an accepted outgoing payment goes only to the allowed account.")
     return 0
 
 

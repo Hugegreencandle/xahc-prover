@@ -1,5 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
-hooks/*.wasm
 hooks/*.raw.wasm
+# the small hook .wasm fixtures ARE tracked — they're what the prover proves
+# against, and not every machine has a wasm32-capable clang to rebuild them.
+!hooks/*.wasm
