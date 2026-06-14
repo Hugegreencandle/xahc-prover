@@ -156,6 +156,27 @@ catches exactly one and clears the other — `emit_double` passes conservation,
 **inline local function calls** (clang outlines a repeated `emit` builder at `-O2`);
 that inliner is now in, with a depth cap that fails loud on recursion.
 
+### The top real-world bug classes — authorization, input-validation, overflow
+
+Mapped from the OWASP Smart Contract Top 10 (where access-control alone was **$953M** of
+2024 losses) onto Xahau hooks — each a one-character bug the prover catches:
+
+```sh
+python src/prove_authz.py hooks/authz_bug.wasm
+# ❌ COUNTEREXAMPLE — accepts a tx from a non-owner: origin=FF00…00  owner=00…00
+#    (the hook read the accounts but forgot to REQUIRE origin == owner)
+
+python src/prove_validate.py hooks/validate_bug.wasm
+# ❌ COUNTEREXAMPLE — accepts even when required param LIM is ABSENT (fail-OPEN)
+
+python src/prove_overflow.py hooks/overflow_bug.wasm
+# ❌ COUNTEREXAMPLE — drops+tip wraps uint64 past the limit check:
+#    true total = 18446744073728427264  >  LIM   (the 64-bit sum wrapped below it)
+```
+
+The `authz` / `validate` / `overflow` correct variants all prove `✅ PROVEN`. See
+`docs/INVARIANT-CANDIDATES.md` for the sourced backlog these came from.
+
 ## Built into `xahc`
 
 The prover is wired into the toolchain — one command from source, CI-friendly exit
@@ -247,24 +268,34 @@ memory addresses, IOU/XFL amounts) all **fail closed** — unmodeled opcodes dri
 verdict to INCONCLUSIVE, and unsupported decodes/inlines raise; never a silent certificate.
 Regression tests in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
+The engine's hard-coded constants were cross-checked against ground truth
+(`XRPLF/hook-macros` `hookapi.h` + `sfcodes.h`, and a `float_one` decode, 2026-06-14):
+field IDs (`sfAmount`/`sfAccount`/`sfDestination`), `float_compare` flags
+(`EQ=1`/`LT=2`/`GT=4`), the XFL bit layout (sign@62, exp 8-bit bias 97, mantissa 54-bit),
+the XFL error sentinels, and guard arithmetic (`GUARD(N)→_g(id,N+1)`) — **zero
+discrepancies**. A wrong constant here would be a false PROVEN, so they are verified, not
+guessed.
+
 ## Status
 
-Proves six invariants — **spend-limit**, **destination-allowlist**,
+Proves ten invariants — **spend-limit**, **destination-allowlist**,
 **guard-termination** (no `GUARD_VIOLATION`), **state-monotonicity** (persisted
-values never move backwards), **no-double-spend** (bounded emit count), and
-**balance-conservation** (emits ≤ received) — on real compiled WASM including the
+values never move backwards), **no-double-spend** (bounded emit count),
+**balance-conservation** (emits ≤ received), **IOU/issued-amount limit** (XFL),
+**authorization** (only the owner can trigger — OWASP SC01), **input-validation**
+(no accept on an absent required param — SC05), and **no-overflow** (uint64 arithmetic
+can't wrap past a check — SC07/09) — on real compiled WASM including the
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
-concrete attack txns. Wired into `xahc prove`. Scope (native single-payment hooks;
+concrete attack txns. All wired into `xahc prove`. Scope (native single-payment hooks;
 all otxn fields modeled — native or symbolic; `switch`/`br_table` executed; no
-`call_indirect`/IOU-XFL) is enforced by failing closed to INCONCLUSIVE outside it.
+`call_indirect`) is enforced by failing closed to INCONCLUSIVE outside it.
 
 Roadmap:
 - **invariant DSL** — state the property in one line instead of a Python driver
-- **IOU / issued-amount conservation** — extend balance-conservation to trustline
-  (XFL `STAmount`) payments, not just native drops
+- **richer state model** — reserve safety (`-38`), foreign-state authorization (`-34`),
+  emission-burden via `cbak` — unlocks invariants #5–7 in `docs/INVARIANT-CANDIDATES.md`
 - **`call_indirect` / function-table support** — the last un-inlinable call form
-- further invariants: state-machine safety, reserve/fee correctness
 
 Not audited. The spec you prove is only as good as the invariant you state.
 

@@ -13,6 +13,7 @@ from wasm import Instr                                # noqa: E402
 import prove_limit, prove_guardrail, prove_termination, prove_monotonic   # noqa: E402
 import prove_nospend, prove_conservation                                  # noqa: E402
 import prove_limit_iou                                                    # noqa: E402
+import prove_authz, prove_validate, prove_overflow                        # noqa: E402
 import xfl                                                                # noqa: E402
 
 H = os.path.join(ROOT, "hooks")
@@ -134,6 +135,15 @@ def test_matrix_verdicts():
     assert prove_conservation.main(os.path.join(H, "emit_forward.wasm")) == 0     # half <= in -> PROVEN
     assert prove_conservation.main(os.path.join(H, "emit_double.wasm")) == 0      # half+half = in -> PROVEN
     assert prove_conservation.main(os.path.join(H, "emit_inflate.wasm")) == 2     # > in -> CEX
+    # authorization (OWASP SC01)
+    assert prove_authz.main(os.path.join(H, "authz.wasm")) == 0                   # owner-only -> PROVEN
+    assert prove_authz.main(os.path.join(H, "authz_bug.wasm")) == 2               # no check -> CEX (attacker)
+    # input validation (SC05)
+    assert prove_validate.main(os.path.join(H, "validate.wasm")) == 0            # REQUIRE present -> PROVEN
+    assert prove_validate.main(os.path.join(H, "validate_bug.wasm")) == 2        # accept w/ param absent -> CEX
+    # no arithmetic overflow (SC07/09)
+    assert prove_overflow.main(os.path.join(H, "overflow.wasm")) == 0           # wrap guard -> PROVEN
+    assert prove_overflow.main(os.path.join(H, "overflow_bug.wasm")) == 2       # drops+tip wraps -> CEX
 
 
 def test_decoder_tracks_types():
