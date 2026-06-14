@@ -6,17 +6,19 @@ invariant — over **every input in the modeled scope**, not just the ones you t
 that scope the verdict is **INCONCLUSIVE**, never a false PROVEN (it *fails closed*).
 
 **Scope of a PROVEN verdict (read this first).** "For all inputs" is precise but
-*bounded*. A PROVEN result holds for: native single-Payment hooks; **every otxn
-field** (sfAmount/sfAccount/sfDestination have exact native models; any other field
-is read as fully symbolic content + a symbolic present/absent length, so a hook
-gating on it is genuinely explored — never skipped); `switch`/`br_table` (forked
-over all targets); loops within their `_g` guard unroll bound; and the modeled
-subset of WASM. `call_indirect` is dispatched through the resolved function table
-(every type-matching target inlined; out-of-bounds / null-slot / type-mismatch indices
-trap to a rollback). The narrow cases that still force INCONCLUSIVE — an element table
-the decoder can't resolve, a table slot pointing at a host import, recursion past the
-depth cap, or symbolic memory addresses — fail closed. Within that scope the "for all
-inputs" claim is real; outside it the prover refuses to certify.
+*bounded*. A PROVEN result holds for: single-Payment hooks over **native and
+IOU/issued (XFL) amounts**; **every otxn field** (sfAmount/sfAccount/sfDestination
+have exact native models; any other field is read as fully symbolic content + a
+symbolic present/absent length, so a hook gating on it is genuinely explored — never
+skipped); `switch`/`br_table` (forked over all targets); `call_indirect` (dispatched
+through the resolved function table — every type-matching target inlined, and
+out-of-bounds / null-slot / type-mismatch indices trap to a rollback); loops within
+their `_g` guard unroll bound; multi-function hooks via call inlining; and the modeled
+subset of WASM. The cases that still force INCONCLUSIVE — nonlinear XFL float ops on
+symbolic operands (and `float_log`/`float_root`, which have no sound model), an element
+table the decoder can't resolve, a table slot pointing at a host import, recursion past
+the depth cap, or symbolic memory addresses — **fail closed**. Within that scope the
+"for all inputs" claim is real; outside it the prover refuses to certify.
 
 ```
 ✅ PROVEN  — for ALL inputs, the hook never accepts when drops > LIM.
@@ -39,15 +41,15 @@ decides. So we symbolically execute the **real compiled WASM** over symbolic inp
 fork at every branch, unroll the (bounded) loops, and ask Z3 whether any path that
 reaches `accept` can violate the invariant.
 
-## The trifecta
+## The trifecta — safe Hooks, end to end
 
-| | tool | does |
+Three open-source tools, one workflow: **write → simulate one tx → prove all inputs.**
+
+| stage | tool | what it does |
 |---|---|---|
-| **write** | [xahc](https://github.com/Hugegreencandle/xahc) | author + compile a safe Hook |
-| **simulate** | [xahau-mcp](https://github.com/Hugegreencandle/xahau-mcp) | run it against one live transaction |
-| **prove** | **xahc-prover** | prove it for **all** transactions |
-
-Write → simulate one → prove all.
+| **write** | [xahc](https://github.com/Hugegreencandle/xahc) | author + compile a safe Hook to clean, lint-passed WASM |
+| **simulate one** | [xahau-mcp](https://github.com/Hugegreencandle/xahau-mcp) | run the real bytecode against one live transaction |
+| **prove all** | [xahc-prover](https://github.com/Hugegreencandle/xahc-prover) | prove an invariant holds for every input in scope — or return the counterexample |
 
 ## Demo
 
