@@ -1031,11 +1031,12 @@ def test_limit_iou_proven_is_non_vacuous():
 FUNCREF = 0x70
 
 
-def _indirect_module(codes, table_entries, passive=False):
+def _indirect_module(codes, table_entries, passive=False, tableidx=0):
     """Module: imports _g/accept/rollback, one handler per `codes` entry (each calls
     accept(0,0,code)), and hook(i32) that call_indirects through table[arg0] (a symbolic
     selector). `table_entries` = global func indices placed in the table at offset 0.
-    passive=True emits a flag-1 (passive) element so the table can't be resolved."""
+    passive=True emits a flag-1 (passive) element so the table can't be resolved.
+    tableidx = the table-index immediate encoded on the call_indirect (default 0)."""
     t_hook = _ftype([I32], [I64])          # 0
     t_g    = _ftype([I32, I32], [I32])     # 1
     t_acc  = _ftype([I32, I32, I64], [I64])# 2
@@ -1056,7 +1057,7 @@ def _indirect_module(codes, table_entries, passive=False):
     GID = (1 << 31) + 1
     hook_b = (_i32c(GID & 0xFFFFFFFF) + _i32c(1) + bytes([0x10]) + _uleb(0) + bytes([0x1A])  # _g; drop
               + bytes([0x20]) + _uleb(0)                                    # local.get 0 (selector)
-              + bytes([0x11]) + _uleb(3) + _uleb(0)                          # call_indirect type3 table0
+              + bytes([0x11]) + _uleb(3) + _uleb(tableidx)                   # call_indirect type3 table<tableidx>
               + bytes([0x1A]) + _i64c(0) + bytes([0x0B]))                    # drop; i64.const 0; end
     bodies = [handler_body(c) for c in codes] + [_uleb(0) + hook_b]
 
@@ -1111,6 +1112,18 @@ def test_call_indirect_unresolved_table_is_inconclusive():
     assert "call_indirect" in e.unsupported, "unresolved table must force INCONCLUSIVE, not PROVEN"
 
 
+def test_call_indirect_nonzero_tableidx_is_inconclusive():
+    # the engine resolves only table 0; a dispatch through table index != 0 is NOT modeled.
+    # It must fail closed (INCONCLUSIVE), never silently dispatch on table 0 -> false PROVEN.
+    # Even with an UNSAFE target (code 999) in the table, the non-zero tableidx must short-
+    # circuit to unsupported before any accept can be recorded.
+    e = Engine(_indirect_module(codes=[0, 999], table_entries=[3, 4], tableidx=1)); e.run()
+    assert "call_indirect" in e.unsupported, "tableidx!=0 must force INCONCLUSIVE, not dispatch table 0"
+    # tableidx==0 control: the same module on table 0 stays resolvable (handler stub above).
+    e0 = Engine(_indirect_module(codes=[0, 999], table_entries=[3, 4], tableidx=0)); e0.run()
+    assert "call_indirect" not in e0.unsupported, "tableidx==0 must keep working as before"
+
+
 # --- invariant DSL: equivalence with hand drivers + soundness -----------------
 def test_dsl_equivalence_conservation():
     for h, expect in [("emit_forward", 0), ("emit_double", 0), ("emit_inflate", 2)]:
@@ -1144,6 +1157,39 @@ def test_dsl_rejects_bad_token_and_xfl_arithmetic():
     assert prove_dsl.main(os.path.join(H, "limit.wasm"), "accept implies emit_count <= 1 ** 2") == 1
     assert prove_dsl.main(os.path.join(H, "limit_iou.wasm"),
                           "accept implies iou_amount <= xfl(5) + xfl(3)") == 1   # no XFL arithmetic
+
+
+def test_dsl_rejects_non_boolean_root_predicate():
+    # A non-boolean top-level expression must HARD-reject (exit 1), never PROVEN. The danger:
+    # the per-path bool check only fires when there ARE accepting paths, so a bare value term
+    # could slip to a vacuous PROVEN on a zero-accept hook. limit.wasm HAS accept paths and
+    # still must reject — the guard is independent of accept count.
+    w = os.path.join(H, "limit.wasm")
+    assert prove_dsl.main(w, "incoming_drops") == 1            # bare quantity, not a predicate
+    assert prove_dsl.main(w, "emitted_total + 1") == 1        # value arithmetic, not a predicate
+    assert prove_dsl.main(w, "emit_count") == 1
+    # static checks agree (engine-independent)
+    assert dsl.is_bool_root(dsl.parse("accept implies incoming_drops <= 5")) is True
+    assert dsl.is_bool_root(dsl.parse("incoming_drops")) is False
+    assert dsl.is_bool_root(dsl.parse("emitted_total + 1")) is False
+    for bad in ("incoming_drops", "emitted_total + 1", "emit_count"):
+        try:
+            dsl.require_bool_root(dsl.parse(bad)); assert False, f"{bad!r} should reject"
+        except dsl.DSLError:
+            pass
+
+
+def test_dsl_non_boolean_root_zero_accept_is_not_proven():
+    # The exact bug: on a hook with NO accepting paths the per-path translation never fires,
+    # so a non-boolean predicate would fall through to a vacuous PROVEN. Drive evaluate() with
+    # an engine that has zero accepts and assert a non-bool root is rejected (1), never PROVEN.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read()); e.run()
+    e.accepts = []; e.accepts_full = []; e.emits_on_accept = []   # simulate zero-accept hook
+    # a VALID boolean predicate over zero accepts is allowed to be vacuously PROVEN ...
+    assert prove_dsl.evaluate(e, dsl.parse("accept implies emit_count <= 1")) == 0
+    # ... but a NON-boolean root must still hard-reject even with zero accept paths.
+    assert prove_dsl.evaluate(e, dsl.parse("incoming_drops")) == 1
+    assert prove_dsl.evaluate(e, dsl.parse("emitted_total + 1")) == 1
 
 
 def test_dsl_violation_is_counterexample():

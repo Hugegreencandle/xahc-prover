@@ -96,7 +96,10 @@ def main(path: str) -> int:
         if r == z3.sat:
             m = s.model()
             ev = lambda b: m.eval(b, model_completion=True).as_long()
-            print("\n❌ COUNTEREXAMPLE — an accepting path emits MORE than it received "
+            # Wording only — do NOT assert the source type (native vs issued). The amount
+            # classifier can collide (an issued/IOU amount misread as native), so naming the
+            # type here could mislead; the verdict (COUNTEREXAMPLE, never PROVEN) is unaffected.
+            print("\n❌ COUNTEREXAMPLE — an accepting path's emitted value exceeds incoming "
                   "(value creation):")
             print(f"   incoming = {ev(incoming)} drops   emitted total = {ev(total)} drops "
                   f"across {count} payment(s)")

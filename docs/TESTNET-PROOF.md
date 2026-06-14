@@ -15,11 +15,13 @@ Explorer: `https://explorer.xahau-test.net/tx/<hash>`
 | **D** — disallowed destination | `rfWNuoWaFuNNz7BsnX6fgb1cubLpbgXiqy` |
 | **E** — `termination_bug` | `rL3GUmiznY6zwPJdaWgwdQVLaJgCtBJa3J` |
 
-Hook installs (SetHook, both `tesSUCCESS`):
+Hook installs — **2 SetHook txs** (both `tesSUCCESS`):
 - A ← agent_guardrail: `F70E84BAC6356D98D71922178887C1D4D4D23F7EEFBCE18CA079CDE36B08744C` (ledger 9673343)
 - E ← termination_bug: `9C51886A10CAE3F849E91ED220D6E1D442BA5B9322FB28CC36D2FCF535CAE7D5` (ledger 9673346)
 
-## Results — prover verdict vs on-chain `engine_result`
+> **Hash count:** this page lists **8 transaction hashes total = 2 SetHook installs (above) + 6 result txs (the table below)**. Only the 6 result txs carry a prover verdict; the 2 installs are setup. So "6/6 agree" counts the 6 verdict txs, not the 2 installs.
+
+## Results — prover verdict vs on-chain `engine_result` (6 result txs)
 | # | case | prover verdict | tx hash | `engine_result` | HookReturnCode | ledger | agree |
 |---|---|---|---|---|---|---|:--:|
 | 1a | spend-limit, under (3 XAH → B) | PROVEN: under-limit accepts | `64D035B6CD3D0C668622641C4E0A8519FDD7E06A7D83968238127DC716F3D7ED` | `tesSUCCESS` | 0x3A | 9673349 | ✓ |

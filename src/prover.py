@@ -821,6 +821,12 @@ class Engine:
                 table = ind["table"]
                 type_sigs = ind["type_sigs"]
                 typeidx = ins.imm[0] if isinstance(ins.imm, tuple) else None
+                tableidx = ins.imm[1] if isinstance(ins.imm, tuple) else None
+                # SINGLE-TABLE assumption made explicit: the engine resolves only table 0
+                # (`ind["table"]`). A dispatch through any other table index is NOT modeled —
+                # fail closed (INCONCLUSIVE), never silently dispatch on table 0.
+                if tableidx != 0:
+                    self.unsupported.add(op); return []
                 if table is None or typeidx is None or typeidx >= len(type_sigs):
                     self.unsupported.add(op); return []
                 impc = ind["import_count"]

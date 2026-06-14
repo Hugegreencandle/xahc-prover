@@ -150,7 +150,7 @@ python src/prove_nospend.py hooks/emit_double.wasm
 # ❌ COUNTEREXAMPLE — an accepting path emits 2 payments (policy allows 1)
 
 python src/prove_conservation.py hooks/emit_inflate.wasm
-# ❌ COUNTEREXAMPLE — emits MORE than it received (value creation):
+# ❌ COUNTEREXAMPLE — emitted value exceeds incoming (value creation):
 #    incoming = 130496 drops   emitted total = 1130496 drops
 ```
 

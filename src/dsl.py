@@ -144,10 +144,36 @@ _KNOWN_IDS = {"incoming_drops", "emitted_total", "emit_count", "accept_code", "d
 _KNOWN_SUBS = {"param", "state_old", "state_new"}
 
 
-def validate(node):
+# node kinds that DENOTE A BOOLEAN at the root of the AST. Everything else (num/xfl/id/
+# sub/bin) is a value term — never a predicate. This is purely structural (engine-independent).
+_BOOL_NODES = {"cmp", "and", "or", "not", "implies", "accept"}
+
+
+def is_bool_root(node) -> bool:
+    """Static, engine-independent: True iff the top-level expression denotes a bool (a
+    predicate), False if it is a value term (an integer/XFL/byte quantity)."""
+    return node[0] in _BOOL_NODES
+
+
+def require_bool_root(node):
+    """Hard-reject a non-boolean top-level predicate BEFORE any PROVEN can be returned —
+    independent of accept-path count. On a zero-accept hook the per-path translation (which is
+    the only other place the bool kind is enforced) never fires, so a value term like
+    `incoming_drops` or `emitted_total + 1` would otherwise fall through to a vacuous PROVEN.
+    A predicate that is not boolean at the root is a malformed invariant, never a proof."""
+    if not is_bool_root(node):
+        raise DSLError("predicate is not boolean at the top level — an invariant must be a "
+                       "condition (e.g. `accept implies emitted_total <= incoming_drops`), "
+                       "not a bare value")
+
+
+def validate(node, _root=True):
     """Static, engine-independent structural check — runs once before the engine, so a bad
     expression is HARD-REJECTED even on a hook with zero accepting paths (where per-path
-    translation would never fire). Rejects unknown identifiers and XFL arithmetic."""
+    translation would never fire). Rejects a non-boolean root predicate (vacuous-PROVEN guard),
+    unknown identifiers, and XFL arithmetic."""
+    if _root:
+        require_bool_root(node)                  # bool-at-root BEFORE anything else can pass
     k = node[0]
     if k == "id":
         if node[1] not in _KNOWN_IDS:
@@ -161,7 +187,7 @@ def validate(node):
                            "never add/subtract them")
     for c in node[1:]:
         if isinstance(c, tuple):
-            validate(c)
+            validate(c, _root=False)
 
 
 def uses_xfl(node) -> bool:

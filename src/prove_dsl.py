@@ -78,6 +78,16 @@ def evaluate(e, ast, predicate: str = "") -> int:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
         return 3
 
+    # bool-at-root gate (also enforced in main() before the engine runs). Re-checked here so
+    # NO caller of evaluate() can reach PROVEN with a non-boolean predicate — on a zero-accept
+    # hook the per-path translation never fires, so this is the only thing standing between a
+    # bare value term (e.g. `incoming_drops`) and a vacuous PROVEN.
+    try:
+        dsl.require_bool_root(ast)
+    except dsl.DSLError as ex:
+        print(f"❌ DSL ERROR (rejected, not proven): {ex}")
+        return 1
+
     print("\n✅ PROVEN — for ALL inputs in scope, every accepting path satisfies the invariant.")
     return 0
 
