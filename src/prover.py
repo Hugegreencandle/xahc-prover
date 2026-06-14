@@ -291,6 +291,14 @@ class Engine:
                     word = z3.Concat(*bs[:8])                      # big-endian 8-byte value word
                     p.cons.append(z3.Extract(63, 63, word) == z3.BitVecVal(1, 1))
                     xflv = word & z3.BitVecVal(~(1 << XFL_NAN_BIT) & ((1 << 64) - 1), 64)
+                    # SOUND: an on-ledger issued STAmount is always a CANONICAL (normalized)
+                    # XFL (mantissa in [1e15,1e16), exponent in range). Constrain the symbolic
+                    # incoming amount to normalized AT THE SOURCE so the engine's lexicographic
+                    # XFL ordering (_float_cmp_c) is valid for EVERY consumer — including the DSL
+                    # `_cmp`, which otherwise compared un-normalized symbolic XFLs (latent
+                    # false-PROVEN on denormals). Hand drivers already add this per-path; doing
+                    # it here makes it unconditional.
+                    p.cons.append(self._float_normalized(xflv))
                     self.inputs["amt_xfl"] = xflv
                     self.inputs["amt48"] = bs
                     st.append(z3.BitVecVal(48, 64))

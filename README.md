@@ -279,8 +279,9 @@ is built so it can never silently lie:
   is recorded → verdict **INCONCLUSIVE**; unsupported decodes raise. Never a silent drop,
   never a PROVEN.
 
-This engine was **self-audited across three lenses** (symbolic-execution soundness,
-WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
+This engine was **self-audited across three lenses** (symbolic-execution soundness, WASM opcode
+semantics, engineering) plus a follow-up adversarial audit. **7 false-PROVEN vectors found + fixed**,
+each now covered by a regression test:
 
 - `hook_param` hardcoded length → dead-coded the DST branch → now **symbolic length**
 - fixed loop-unroll bound → silently dropped paths → now **reads the real `_g` maxiter**, else INCONCLUSIVE
@@ -288,6 +289,9 @@ WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
 - shifts unmasked → `x << 32` gave `0` not `x` → now **masked mod width** (WASM-faithful)
 - div/rem treated as total → trap path could reach `accept` → now **÷0 / `INT_MIN/-1` model as rollback**
 - i64 locals + the global section were guessed → now **decoded at real width / init value**
+- IOU balance-conservation reported a concrete emit as "conserved" **without comparing to the
+  incoming amount** → now **fails closed to INCONCLUSIVE** for IOU emits (incoming-issued
+  conservation is not modeled). *(found by the 2026-06-15 audit)*
 
 The remaining gaps (symbolic memory addresses, unresolvable element tables,
 table-slot-to-import, recursion past the depth cap) all **fail closed** — they drive the

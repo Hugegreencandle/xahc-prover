@@ -126,18 +126,21 @@ Capture tool: `asciinema` for crisp terminal, or screen-record + the explorer ta
 > symbolically executes a Hook's compiled WASM and mathematically proves it obeys a safety
 > invariant (spend limits, destination locks, guard-termination, state-monotonicity,
 > no-double-spend, balance-conservation, authorization, input-validation, overflow, IOU
-> limits) for **all** inputs in scope, or returns the exact transaction that breaks it. Every
-> verdict was reproduced on the live Xahau testnet (6/6 agree). It's the third leg of an
-> open-source trifecta — write (xahc), simulate (xahau-mcp), prove (xahc-prover) — MIT-licensed.
+> limits) for **all** inputs in scope, or returns the exact transaction that breaks it. Six
+> testnet cases — across three of the invariants (spend-limit, destination-lock,
+> guard-termination) — were reproduced on the live Xahau testnet and agree with the prover. It's
+> the third leg of an open-source trifecta — write (xahc), simulate (xahau-mcp), prove
+> (xahc-prover) — MIT-licensed.
 
 ---
 
 ## D) Headline facts (all verifiable in-repo)
 - First Hook verifier (a search for one returns only EVM tools).
 - 10 invariants, each with a falsifiable buggy twin; 49 regression tests.
-- 3-lens self-audit; 5 false-PROVEN vectors found + fixed; fails closed.
-- 6/6 testnet cases agree — real hashes in docs/TESTNET-PROOF.md (e.g. over-limit reject
-  `8AA5CB5C…BA4DA88`; guard-violation `EE95C114…49B9A6`, HookReturnCode `0x8000000000000010`).
+- 3-lens self-audit + a follow-up audit; **7 false-PROVEN vectors found + fixed**; fails closed.
+- 6/6 testnet cases agree (covering 3 of the invariants) — real hashes in docs/TESTNET-PROOF.md
+  (e.g. over-limit reject `8AA5CB5C…BA4DA88`; guard-violation `EE95C114…49B9A6`, HookReturnCode
+  `0x8000000000000010`).
 - `call_indirect` executed; one-line invariant DSL; integrated as `xahc prove`.
 - Honest scope: a PROVEN verdict is bounded to the engine's modeled subset; outside it the
   prover returns INCONCLUSIVE, never a false PROVEN.

@@ -51,12 +51,17 @@ def main(path: str) -> int:
         if e.hit_bound:
             print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; cannot prove.")
             return 3
-        # All IOU float ops were concrete (folded to literals). With no symbolic
-        # taint and no incoming-IOU relationship modeled, there is no value-creation
-        # path the prover can construct — report the conservative clean PROVEN.
-        print("\n✅ PROVEN — emitted IOU value(s) are concrete (no symbolic float taint); "
-              "no value-creation path exists. Balance conserved.")
-        return 0
+        # SOUNDNESS (was a FALSE PROVEN): a concrete, un-tainted IOU emit is NOT proof of
+        # conservation. The invariant is `Σ emitted <= received`, but this driver does NOT
+        # model the INCOMING issued amount (currency + issuer + XFL) to compare against — so
+        # a hook that emits a fixed IOU while receiving nothing (value creation) previously
+        # printed "Balance conserved". We cannot decide `<= received` without the incoming
+        # side, so we FAIL CLOSED. Real IOU conservation (per-currency/issuer matching + an
+        # XFL inequality vs the incoming issued amount) is future work.
+        print("\n⚠️ INCONCLUSIVE — IOU/issued-amount conservation is not modeled: the incoming "
+              "issued amount is not compared against the emitted IOU, so `Σ emitted <= received` "
+              "cannot be decided. Refusing to claim PROVEN (fail closed).")
+        return 3
 
     if not amt:
         # Reached the native-conservation path but the hook read an incoming ISSUED

@@ -698,7 +698,12 @@ def test_iou_matrix_verdicts():
     # The 4 IOU fixtures and their REQUIRED verdicts.
     assert prove_limit_iou.main(os.path.join(H, "limit_iou.wasm")) == 0          # PROVEN
     assert prove_limit_iou.main(os.path.join(H, "limit_iou_inverted.wasm")) == 2  # CEX
-    assert prove_conservation.main(os.path.join(H, "emit_iou.wasm")) == 0         # clean PROVEN
+    # emit_iou.wasm emits a concrete IOU while reading NO incoming amount = value creation.
+    # IOU conservation is NOT modeled (no incoming-issued comparison), so this MUST fail closed
+    # to INCONCLUSIVE — it previously returned a FALSE PROVEN (0) and this test enshrined it.
+    rc_iou_cons = prove_conservation.main(os.path.join(H, "emit_iou.wasm"))
+    assert rc_iou_cons == 3, f"emit_iou conservation MUST be INCONCLUSIVE(3), got {rc_iou_cons}"
+    assert rc_iou_cons != 0, "FATAL: IOU conservation returned a FALSE PROVEN (the audit bug)"
     # CRITICAL: a symbolic float_multiply into an emit must be INCONCLUSIVE, never PROVEN.
     rc = prove_conservation.main(os.path.join(H, "iou_multiply_bug.wasm"))
     assert rc == 3, f"iou_multiply_bug MUST be INCONCLUSIVE(3), got {rc} — model UNSOUND if 0!"
