@@ -56,6 +56,10 @@ def main(path: str, max_drops: int | None = None) -> int:
             print(f"   sfAmount bytes = {av.hex().upper()}   LIM = {lv.hex().upper()}")
             return 2
 
+    if e.hit_bound:
+        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
+        return 3
+
     print("\n✅ PROVEN — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.")
     return 0
 

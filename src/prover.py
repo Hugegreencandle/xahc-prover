@@ -67,6 +67,12 @@ class Engine:
         self.accepts: list = []      # (code:int|None, cons) per accepting path
         self.rollbacks: list = []    # (code, cons)
         self.hook = next(f for f in self.funcs if f.name == "hook")
+        self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
+        # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
+        # unroll bound. If True, the analysis is INCOMPLETE and must NOT claim
+        # PROVEN — deeper iterations were not explored.
+        self.hit_bound = False
+        self._undef = 0              # counter for fresh uninitialized-memory bytes
 
     def fresh_bytes(self, name: str, n: int):
         bs = [z3.BitVec(f"{name}_{i}", 8) for i in range(n)]
@@ -79,7 +85,13 @@ class Engine:
             p.mem[addr + k] = b
 
     def load_byte(self, p: Path, addr: int):
-        return p.mem.get(addr, z3.BitVecVal(0, 8))
+        b = p.mem.get(addr)
+        if b is None:
+            # SOUND: an unwritten byte is the WORST CASE — a fresh symbolic, not 0.
+            # Stable per (address) so repeated reads agree within a path.
+            b = z3.BitVec(f"memundef_{addr}", 8)
+            p.mem[addr] = b
+        return b
 
     def load(self, p: Path, addr: int, n: int, signed: bool, to64: bool):
         # little-endian assemble n bytes
@@ -126,12 +138,18 @@ class Engine:
             return
         if name == "hook_param":
             klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
-            # key bytes (concrete, from memory) name the parameter
+            # key bytes (concrete, from the data section) name the parameter
             key = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen))
             kn = key.decode("latin1")
-            bs = self.inputs.get(f"param:{kn}") or self.fresh_bytes(f"param:{kn}", 8)
-            self.store_bytes(p, wptr, bs[:min(len(bs), wlen)])
-            st.append(z3.BitVecVal(8, 64)); return
+            n = max(1, min(wlen, 256))
+            bs = self.inputs.get(f"param:{kn}")
+            if bs is None or len(bs) < n:
+                bs = self.fresh_bytes(f"param:{kn}", n)
+            self.store_bytes(p, wptr, bs[:n])
+            # SOUND: the host's return (param length, or negative if absent) is
+            # SYMBOLIC, so every length-gated branch — e.g. the guardrail's
+            # `hook_param(DST) == 20` destination lock — is actually explored.
+            st.append(z3.BitVec(f"hook_param_ret:{kn}", 64)); return
         if name in ("accept", "rollback"):
             code = conc(st.pop()); st.pop(); st.pop()
             (self.accepts if name == "accept" else self.rollbacks).append((code, list(p.cons)))
@@ -183,6 +201,25 @@ class Engine:
                 out.append((sig, pp))
         return out
 
+    def _loop_budget(self, body) -> int:
+        # XAHC_GUARD(n) compiles (after reposition) to `const id; const (n+1);
+        # call _g` at the loop head. Unroll to the declared bound so no feasible
+        # iteration is ever dropped; a loop that exceeds its guard is a runtime
+        # GUARD_VIOLATION (rollback), never a hidden accept.
+        consts = []
+        for ins in body:
+            if ins.op in ("i32.const", "i64.const"):
+                consts.append(ins.imm)
+            elif ins.op == "call":
+                if ins.imm == self._g_idx and len(consts) >= 1 and isinstance(consts[-1], int):
+                    m = consts[-1] & 0xFFFFFFFF
+                    if 0 < m < (1 << 20):
+                        return min(m + 2, 8192)
+                consts = []
+            else:
+                consts = []
+        return LOOP_UNROLL
+
     def _loop(self, body, p, budget):
         out = []
         for sig, pp in self._exec_seq(body, [p]):
@@ -193,7 +230,11 @@ class Engine:
                 if d == 0:                         # branch to loop top -> iterate
                     if budget > 0:
                         out.extend(self._loop(body, pp, budget - 1))
-                    # else: exceeded unroll bound -> prune (guard bounds real hooks)
+                    else:
+                        # A still-feasible back-edge dropped at the bound. The
+                        # analysis is now INCOMPLETE — record it so the verdict
+                        # cannot claim PROVEN (soundness over convenience).
+                        self.hit_bound = True
                 else:
                     out.append((("br", d - 1), pp))
             else:
@@ -207,7 +248,7 @@ class Engine:
             if op == "block":
                 return self._block_like(ins.body, p)
             if op == "loop":
-                return self._loop(ins.body, p, LOOP_UNROLL)
+                return self._loop(ins.body, p, self._loop_budget(ins.body))
             if op == "if":
                 cond = p.stack.pop()
                 out = []

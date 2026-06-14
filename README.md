@@ -56,8 +56,8 @@ python src/prove_guardrail.py hooks/agent_guardrail.wasm
 
 This is the **actual `agent_guardrail` hook** deployed on Xahau testnet — multiple
 guarded loops (the 20-byte outgoing-account check), the `otxn_type`/incoming
-branches, the optional destination lock — symbolically executed across all 5 paths
-and proven. Flip one comparison and the prover hands back the attack transaction:
+branches, **and the optional destination lock (`hook_param(DST)==20`, genuinely
+explored)** — symbolically executed across every path and proven. Flip one comparison and the prover hands back the attack transaction:
 
 ```sh
 python src/prove_guardrail.py hooks/agent_guardrail_buggy.wasm 600000000000000000
@@ -92,6 +92,27 @@ hooks/x.wasm ──▶ src/wasm.py   decode WASM -> nested instruction tree
 The symbolic inputs (`sfAmount` bytes, the `LIM` param, the account) are free
 variables; a *spec* (`drops = bytes big-endian`, `accept ⟹ drops ≤ LIM`) is checked
 against every accepting path. A SAT result is a concrete attack transaction.
+
+## Soundness — the prover fails closed
+
+A prover that says PROVEN when a hook is unsafe is worse than no prover. The engine
+is built so it can never silently lie:
+
+- **Loops unroll to the real `_g` guard bound**, read from the bytecode — not a
+  guess. If a feasible path is ever dropped at the bound, the verdict is
+  **INCONCLUSIVE**, never PROVEN.
+- **Host-return lengths and uninitialized memory are symbolic** (worst case), so
+  length-gated branches — like the guardrail's `hook_param(DST) == 20` lock — are
+  actually explored, not constant-folded away.
+- **`otxn_type` and all inputs are free symbolic** — over-approximating, the safe
+  direction (can add spurious paths, never hide a real one).
+- **Unsupported opcodes / `call_indirect` / un-inlined local calls RAISE** — they
+  never silently drop a path.
+
+This engine was **self-audited for soundness**: two false-PROVEN vectors were found
+and fixed (a hardcoded `hook_param` length that dead-coded the DST branch; silent
+loop-bound pruning that ignored the real guard maxiter). Verdicts: `PROVEN` /
+`COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
