@@ -35,7 +35,7 @@ class Terminal(Exception):
 
 
 class Path:
-    __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards")
+    __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes")
 
     def __init__(self):
         self.stack: list = []
@@ -44,6 +44,7 @@ class Path:
         self.mem: dict = {}     # concrete addr -> BitVec(8)
         self.cons: list = []    # path constraints (z3 Bool)
         self.guards: dict = {}  # guard id -> crossings so far on this path
+        self.writes: dict = {}  # state key (str) -> last value written (BitVec) on this path
 
     def clone(self) -> "Path":
         p = Path()
@@ -53,6 +54,7 @@ class Path:
         p.mem = dict(self.mem)
         p.cons = list(self.cons)
         p.guards = dict(self.guards)
+        p.writes = dict(self.writes)
         return p
 
 
@@ -67,8 +69,10 @@ class Engine:
         self.imports, self.funcs, self.datas, self.globals_init = parse(wasm)
         self.inputs: dict = {}       # name -> list[BitVec(8)] symbolic input bytes
         self.accepts: list = []      # (code:int|None, cons) per accepting path
+        self.accepts_full: list = [] # (code, cons, writes) — same paths, with state writes
         self.rollbacks: list = []    # (code, cons)
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
+        self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
         self.hook = next(f for f in self.funcs if f.name == "hook")
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
@@ -166,9 +170,34 @@ class Engine:
             ret = z3.BitVec(f"hook_param_ret:{kn}", 64)
             self.inputs[f"hook_param_ret:{kn}"] = ret    # expose for invariant scoping
             st.append(ret); return
+        if name == "state":
+            # state(write_ptr, write_len, kread_ptr, kread_len) -> bytes read
+            klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
+            kn = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen)).decode("latin1")
+            n = max(1, min(wlen, 256))
+            # SOUND worst case for monotonicity: assume the slot EXISTS with a
+            # symbolic prior value (you can only "decrease" something already there).
+            old = self.state_old.get(kn)
+            if old is None or len(old) < n:
+                old = [z3.BitVec(f"state_old:{kn}_{i}", 8) for i in range(n)]
+                self.state_old[kn] = old
+            self.store_bytes(p, wptr, old[:n])
+            st.append(z3.BitVecVal(n, 64)); return
+        if name == "state_set":
+            # state_set(read_ptr, read_len, kread_ptr, kread_len) -> bytes written
+            klen = conc(st.pop()); kptr = conc(st.pop()); rlen = conc(st.pop()); rptr = conc(st.pop())
+            kn = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen)).decode("latin1")
+            n = max(1, min(rlen, 256))
+            vbytes = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian value
+            p.writes[kn] = z3.Concat(*vbytes) if n > 1 else vbytes[0]
+            st.append(z3.BitVecVal(n, 64)); return
         if name in ("accept", "rollback"):
             code = conc(st.pop()); st.pop(); st.pop()
-            (self.accepts if name == "accept" else self.rollbacks).append((code, list(p.cons)))
+            if name == "accept":
+                self.accepts.append((code, list(p.cons)))
+                self.accepts_full.append((code, list(p.cons), dict(p.writes)))
+            else:
+                self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
         raise NotImplementedError(f"host fn {name} not modeled")
 

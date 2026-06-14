@@ -7,7 +7,7 @@ import z3
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 from prover import Engine, Path                      # noqa: E402
-import prove_limit, prove_guardrail, prove_termination   # noqa: E402
+import prove_limit, prove_guardrail, prove_termination, prove_monotonic   # noqa: E402
 
 H = os.path.join(ROOT, "hooks")
 ENG = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())  # any module, for method use
@@ -53,6 +53,9 @@ def test_matrix_verdicts():
     # guard-termination
     assert prove_termination.main(os.path.join(H, "agent_guardrail.wasm")) == 0   # fixed loops -> PROVEN
     assert prove_termination.main(os.path.join(H, "termination_bug.wasm")) == 2   # data-dependent loop -> CEX
+    # state-monotonicity
+    assert prove_monotonic.main(os.path.join(H, "monotonic.wasm")) == 0           # strictly-increasing -> PROVEN
+    assert prove_monotonic.main(os.path.join(H, "monotonic_bug.wasm")) == 2       # no check -> CEX (replay)
 
 
 def test_decoder_tracks_types():

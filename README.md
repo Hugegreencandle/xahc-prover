@@ -106,6 +106,37 @@ violation the instant a feasible path exceeds its budget. This is the property t
 halting problem *denies* you on Ethereum: you cannot prove an arbitrary EVM contract
 even halts, let alone halts within budget. On Xahau you can.
 
+### State-monotonicity — a stored value never moves backwards
+
+Replay protection lives in hook state: a stored nonce / sequence / high-water mark
+that must only ever increase. A hook that can be driven to overwrite it with a
+*smaller* value is a replay/rollback bug. We prove it can't — modeling `state` (the
+slot holds a symbolic prior value) and `state_set` (the written value), then checking
+no accepting path lands the stored value lower:
+
+```sh
+python src/prove_monotonic.py hooks/monotonic.wasm
+# ✅ PROVEN — every accepted write to hook state is never below its prior value.
+
+python src/prove_monotonic.py hooks/monotonic_bug.wasm
+# ❌ COUNTEREXAMPLE — accept writes state[NONCE] < its prior value (replay):
+#    written = 0   prior = 1      (the missing strictly-increasing check)
+```
+
+## Built into `xahc`
+
+The prover is wired into the toolchain — one command from source, CI-friendly exit
+codes (`0` PROVEN, `2` COUNTEREXAMPLE, `3` INCONCLUSIVE):
+
+```sh
+xahc prove myhook.c --invariant termination     # builds .c, then proves
+xahc prove myhook.wasm --invariant monotonic
+xahc prove limit.wasm --invariant limit -- 600000000000000000   # forward args after --
+```
+
+`xahc prove` locates the prover via `$XAHC_PROVER_DIR` (or a sibling checkout) and
+runs it against the built WASM.
+
 ### Verified on-chain
 
 Every Prover verdict was confirmed on **Xahau testnet** — install the hook, send a
@@ -172,18 +203,17 @@ in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
-Proves three invariants — **spend-limit**, **destination-allowlist**, and
-**guard-termination** (no `GUARD_VIOLATION` for any input) — on the **real
-`agent_guardrail`** (loops, branches, the optional `hook_param(DST)` lock), the hook
-actually deployed on testnet. Real symbolic execution of compiled WASM, not a mock.
-Every proof is falsifiable: buggy variants yield concrete attack txns.
+Proves four invariants — **spend-limit**, **destination-allowlist**,
+**guard-termination** (no `GUARD_VIOLATION` for any input), and **state-monotonicity**
+(persisted values never move backwards) — on real compiled WASM including the
+**`agent_guardrail`** deployed on testnet. Not a mock. Every proof is falsifiable:
+buggy variants yield concrete attack txns. Wired into `xahc prove`.
 
 Roadmap:
-- more invariants: state monotonicity, no-double-spend across emitted txns
+- more invariants: no-double-spend across emitted txns, balance conservation
 - multi-function hooks via local-call inlining (the guardrail inlines to one fn at
   `-O2`; larger hooks will need explicit inlining)
 - an invariant DSL so you write the property in one line
-- `xahc prove` integration so it's one command from source
 
 Not audited. The spec you prove is only as good as the invariant you state.
 
