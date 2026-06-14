@@ -35,7 +35,7 @@ class Terminal(Exception):
 
 
 class Path:
-    __slots__ = ("stack", "locals", "globals", "mem", "cons")
+    __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards")
 
     def __init__(self):
         self.stack: list = []
@@ -43,6 +43,7 @@ class Path:
         self.globals: dict = {}
         self.mem: dict = {}     # concrete addr -> BitVec(8)
         self.cons: list = []    # path constraints (z3 Bool)
+        self.guards: dict = {}  # guard id -> crossings so far on this path
 
     def clone(self) -> "Path":
         p = Path()
@@ -51,6 +52,7 @@ class Path:
         p.globals = dict(self.globals)
         p.mem = dict(self.mem)
         p.cons = list(self.cons)
+        p.guards = dict(self.guards)
         return p
 
 
@@ -66,6 +68,7 @@ class Engine:
         self.inputs: dict = {}       # name -> list[BitVec(8)] symbolic input bytes
         self.accepts: list = []      # (code:int|None, cons) per accepting path
         self.rollbacks: list = []    # (code, cons)
+        self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.hook = next(f for f in self.funcs if f.name == "hook")
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
@@ -115,7 +118,18 @@ class Engine:
     def host_call(self, name: str, p: Path):
         st = p.stack
         if name == "_g":
-            st.pop(); st.pop(); st.append(z3.BitVecVal(1, 32)); return
+            maxiter = conc(st.pop()); gid = conc(st.pop()); st.append(z3.BitVecVal(1, 32))
+            # Model the on-chain guard rule EXACTLY: _g(id, maxiter) may be crossed
+            # at most `maxiter` times per hook call; crossing it more is a runtime
+            # GUARD_VIOLATION (the hook is killed -> rollback). Counting crossings
+            # 1:1 with the host (no unroll slack) is what makes guard-termination
+            # provable: a fixed-bound loop trips nothing; a data-dependent loop an
+            # attacker can drive past its budget terminates this path as a violation.
+            p.guards[gid] = p.guards.get(gid, 0) + 1
+            if p.guards[gid] > maxiter:
+                self.guard_viols.append((gid, maxiter, list(p.cons)))
+                raise Terminal()
+            return
         if name == "otxn_type":
             t = z3.BitVec("otxn_type", 64)
             self.inputs.setdefault("otxn_type", t)

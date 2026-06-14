@@ -83,6 +83,29 @@ python src/prove_guardrail.py hooks/agent_guardrail_dstbug.wasm
 #    Destination=…FF  allowed(DST)=…00      (differs only in byte 19, the unchecked one)
 ```
 
+### Guard-termination — the invariant only a bounded VM can have
+
+Every Hook loop must carry a `_g(id, maxiter)` guard; crossing it more than
+`maxiter` times in one call kills the hook with `GUARD_VIOLATION`. The compiler
+checks a guard is *present* — not that `maxiter` actually bounds the loop. A loop
+whose trip count an attacker controls passes lint and dies on-chain. We prove it
+can't happen — for all inputs:
+
+```sh
+python src/prove_termination.py hooks/agent_guardrail.wasm
+# ✅ PROVEN — no guard is ever crossed past its budget; never dies with GUARD_VIOLATION.
+
+python src/prove_termination.py hooks/termination_bug.wasm
+# ❌ COUNTEREXAMPLE — guard 0x80000002 (budget 9) can be crossed > 9 times:
+#    amt = …F0     (last byte 240 → the loop runs 240× against an 8-iteration budget)
+```
+
+The engine counts `_g` crossings 1:1 with the host — no unroll slack — so a
+fixed-bound loop (`i < 20`) trips nothing and a data-dependent one terminates as a
+violation the instant a feasible path exceeds its budget. This is the property the
+halting problem *denies* you on Ethereum: you cannot prove an arbitrary EVM contract
+even halts, let alone halts within budget. On Xahau you can.
+
 ### Verified on-chain
 
 Every Prover verdict was confirmed on **Xahau testnet** — install the hook, send a
@@ -144,14 +167,14 @@ in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 ## Status
 
-Proves two invariants — **spend-limit** and **destination-allowlist** — on the
-**real `agent_guardrail`** (loops, branches, the optional `hook_param(DST)` lock),
-the hook actually deployed on testnet. Real symbolic execution of compiled WASM,
-not a mock. Both proofs are falsifiable: buggy variants yield concrete attack txns.
+Proves three invariants — **spend-limit**, **destination-allowlist**, and
+**guard-termination** (no `GUARD_VIOLATION` for any input) — on the **real
+`agent_guardrail`** (loops, branches, the optional `hook_param(DST)` lock), the hook
+actually deployed on testnet. Real symbolic execution of compiled WASM, not a mock.
+Every proof is falsifiable: buggy variants yield concrete attack txns.
 
 Roadmap:
-- more invariants: state monotonicity, **guard-termination** (prove no
-  `GUARD_VIOLATION` for any input)
+- more invariants: state monotonicity, no-double-spend across emitted txns
 - multi-function hooks via local-call inlining (the guardrail inlines to one fn at
   `-O2`; larger hooks will need explicit inlining)
 - an invariant DSL so you write the property in one line
