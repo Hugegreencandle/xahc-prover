@@ -236,9 +236,11 @@ local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yiel
 concrete attack txns. Wired into `xahc prove`.
 
 Roadmap:
-- more invariants: balance conservation across IOU/issued amounts, state-machine safety
-- an invariant DSL so you write the property in one line
-- `call_indirect` / function-table support
+- **invariant DSL** — state the property in one line instead of a Python driver
+- **IOU / issued-amount conservation** — extend balance-conservation to trustline
+  (XFL `STAmount`) payments, not just native drops
+- **`call_indirect` / function-table support** — the last un-inlinable call form
+- further invariants: state-machine safety, reserve/fee correctness
 
 Not audited. The spec you prove is only as good as the invariant you state.
 
