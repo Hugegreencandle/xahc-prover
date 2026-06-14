@@ -174,7 +174,10 @@ def _decode_seq(r: Reader, stop_on_else=False):
                 deflt = r.uleb()
                 ins.imm = (tgts, deflt)
             elif kind == "I":
-                r.uleb(); r.byte()  # typeidx, table 0x00
+                # call_indirect: (type index, table index). KEEP the type index — the
+                # engine type-checks each table entry against it (a mismatch traps).
+                typeidx = r.uleb(); tableidx = r.uleb()  # tableidx is the 0x00 byte pre-reftypes
+                ins.imm = (typeidx, tableidx)
         out.append(ins)
 
 
@@ -193,6 +196,9 @@ def parse(wasm: bytes):
     globals_init: list[tuple] = []  # (init_value, width_bits) per DEFINED global
     exports_fn: list[tuple] = []    # (name, func_idx) — applied after code is parsed
     import_func_count = 0
+    import_type_idx: list[int] = [] # type index per imported function (call_indirect type-check)
+    elems: dict = {}                # table_index -> global function index (active elements)
+    elem_unsupported = False        # set if the element section uses constructs we don't decode
 
     while not r.eof():
         sid = r.byte()
@@ -210,7 +216,7 @@ def parse(wasm: bytes):
             for _ in range(n):
                 mod = r.name(); nm = r.name(); kind = r.byte()
                 if kind == 0x00:  # func import
-                    r.uleb()  # type idx
+                    import_type_idx.append(r.uleb())  # type idx (kept for call_indirect check)
                     imports.append(nm)
                     import_func_count += 1
                 elif kind == 0x01:  # table
@@ -282,6 +288,28 @@ def parse(wasm: bytes):
                 nm = r.name(); kind = r.byte(); idx = r.uleb()
                 if kind == 0x00:
                     exports_fn.append((nm, idx))
+        elif sid == 9:  # element — the function table call_indirect dispatches through.
+            # We decode ONLY the simple active form clang emits for hooks: flag 0 =
+            # (table 0, i32.const offset, vec(funcidx)). Anything else (passive,
+            # declarative, table.init, expr-elements, non-zero table) is NOT guessed —
+            # we mark the table unresolved so call_indirect fails closed to INCONCLUSIVE.
+            n = r.uleb()
+            for _ in range(n):
+                flags = r.uleb()
+                if flags != 0:
+                    elem_unsupported = True
+                    break
+                op = r.byte()                       # offset const-expr
+                if op != 0x41:                      # must be i32.const
+                    elem_unsupported = True
+                    break
+                off = r.sleb()
+                if r.byte() != 0x0B:                # end of const-expr
+                    elem_unsupported = True
+                    break
+                m = r.uleb()
+                for j in range(m):
+                    elems[off + j] = r.uleb()       # table[off+j] = global func index
         r.i = end
 
     for nm, idx in exports_fn:
@@ -290,4 +318,15 @@ def parse(wasm: bytes):
             if li < len(code_funcs):
                 code_funcs[li].name = nm
 
-    return imports, code_funcs, datas, globals_init
+    # call_indirect dispatch data. `table` is the resolved {table_index -> global func
+    # index} map, or None if the element section used constructs we don't decode (then
+    # the engine fails closed to INCONCLUSIVE). The type tables let the engine type-check
+    # each entry against the call_indirect type index (a mismatch traps).
+    indirect = {
+        "table": (None if elem_unsupported else elems),
+        "import_count": import_func_count,
+        "func_type_idx": func_type_idx,     # type idx per DEFINED func (key = local idx)
+        "import_type_idx": import_type_idx,  # type idx per imported func
+        "type_sigs": type_sigs,              # (params, results) tuple per type idx
+    }
+    return imports, code_funcs, datas, globals_init, indirect

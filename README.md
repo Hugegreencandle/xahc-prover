@@ -11,9 +11,12 @@ field** (sfAmount/sfAccount/sfDestination have exact native models; any other fi
 is read as fully symbolic content + a symbolic present/absent length, so a hook
 gating on it is genuinely explored — never skipped); `switch`/`br_table` (forked
 over all targets); loops within their `_g` guard unroll bound; and the modeled
-subset of WASM. It does **not** yet cover `call_indirect` or IOU/XFL amounts —
-those force INCONCLUSIVE. Within that scope the "for all inputs" claim is real;
-outside it the prover refuses to certify.
+subset of WASM. `call_indirect` is dispatched through the resolved function table
+(every type-matching target inlined; out-of-bounds / null-slot / type-mismatch indices
+trap to a rollback). The narrow cases that still force INCONCLUSIVE — an element table
+the decoder can't resolve, a table slot pointing at a host import, recursion past the
+depth cap, or symbolic memory addresses — fail closed. Within that scope the "for all
+inputs" claim is real; outside it the prover refuses to certify.
 
 ```
 ✅ PROVEN  — for ALL inputs, the hook never accepts when drops > LIM.
@@ -249,9 +252,14 @@ is built so it can never silently lie:
   one). A hook gating accept on any field is explored, not skipped.
 - **`switch`/`br_table` is executed** — forked over every labelled target plus the
   default (`idx >= n`), exhaustively and exclusively, so no real case is dropped.
-- **Unsupported opcodes (`call_indirect`) and un-inlined local calls fail closed**
-  — an unmodeled opcode is recorded and the verdict becomes **INCONCLUSIVE**; an
-  unsupported decode/inline raises. Either way, never a silent drop and never a PROVEN.
+- **`call_indirect` is executed** — dispatched through the decoder-resolved function
+  table: every type-matching defined target is inlined under `idx == its slot`, and every
+  other index (out-of-bounds, empty slot, type mismatch) traps to a rollback, exhaustively,
+  so no reachable callee is dropped and a trap never reaches `accept`.
+- **What can't be modeled fails closed** — an unresolvable element table, a table slot
+  pointing at a host import, recursion past the depth cap, or a genuinely unmodeled opcode
+  is recorded → verdict **INCONCLUSIVE**; unsupported decodes raise. Never a silent drop,
+  never a PROVEN.
 
 This engine was **self-audited across three lenses** (symbolic-execution soundness,
 WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
@@ -263,10 +271,10 @@ WASM opcode semantics, engineering). Every false-PROVEN vector found was fixed:
 - div/rem treated as total → trap path could reach `accept` → now **÷0 / `INT_MIN/-1` model as rollback**
 - i64 locals + the global section were guessed → now **decoded at real width / init value**
 
-The remaining gaps (`call_indirect`, un-inlined local calls, symbolic
-memory addresses, IOU/XFL amounts) all **fail closed** — unmodeled opcodes drive the
-verdict to INCONCLUSIVE, and unsupported decodes/inlines raise; never a silent certificate.
-Regression tests in `tests/`. Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
+The remaining gaps (symbolic memory addresses, unresolvable element tables,
+table-slot-to-import, recursion past the depth cap) all **fail closed** — they drive the
+verdict to INCONCLUSIVE, and unsupported decodes raise; never a silent certificate.
+Regression tests in `tests/` (41). Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 The engine's hard-coded constants were cross-checked against ground truth
 (`XRPLF/hook-macros` `hookapi.h` + `sfcodes.h`, and a `float_one` decode, 2026-06-14):
@@ -288,14 +296,15 @@ can't wrap past a check — SC07/09) — on real compiled WASM including the
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
 concrete attack txns. All wired into `xahc prove`. Scope (native single-payment hooks;
-all otxn fields modeled — native or symbolic; `switch`/`br_table` executed; no
-`call_indirect`) is enforced by failing closed to INCONCLUSIVE outside it.
+all otxn fields modeled — native or symbolic; `switch`/`br_table` and `call_indirect`
+executed; multi-function via inlining) is enforced by failing closed to INCONCLUSIVE outside it.
 
 Roadmap:
 - **invariant DSL** — state the property in one line instead of a Python driver
 - **richer state model** — reserve safety (`-38`), foreign-state authorization (`-34`),
   emission-burden via `cbak` — unlocks invariants #5–7 in `docs/INVARIANT-CANDIDATES.md`
-- **`call_indirect` / function-table support** — the last un-inlinable call form
+- **`call_indirect` to host imports / unresolvable tables** — currently fail closed; model
+  if a real hook needs them
 
 Not audited. The spec you prove is only as good as the invariant you state.
 

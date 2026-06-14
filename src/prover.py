@@ -104,7 +104,7 @@ def feasible(cons) -> bool:
 
 class Engine:
     def __init__(self, wasm: bytes):
-        self.imports, self.funcs, self.datas, self.globals_init = parse(wasm)
+        self.imports, self.funcs, self.datas, self.globals_init, self.indirect = parse(wasm)
         self.inputs: dict = {}       # name -> list[BitVec(8)] symbolic input bytes
         self.accepts: list = []      # (code:int|None, cons) per accepting path
         self.accepts_full: list = [] # (code, cons, writes) — same paths, with state writes
@@ -799,12 +799,50 @@ class Engine:
                 if feasible(pd.cons):
                     out.append((("br", deflt), pd))
                 return out
-            # call_indirect has no sound execution model here (function-table dispatch).
-            # Record it so the verdict is forced to INCONCLUSIVE, and END this path
-            # cleanly instead of a misleading stack underflow. SOUND: never PROVEN.
+            # call_indirect (function-table dispatch). Sound model:
+            #   - resolve the table (decoder); unresolved -> fail closed (INCONCLUSIVE)
+            #   - fork over every type-matching DEFINED target under (i == its table slot),
+            #     inlining it exactly like a direct call
+            #   - every other index (out-of-bounds, empty slot, or type-mismatch) TRAPS in
+            #     WASM -> model as a rollback (a trap can never flow a value to accept)
+            #   - a table slot pointing at an IMPORT can't be inlined as a host fn -> fail
+            #     closed. SOUND: every reachable callee is explored; nothing un-modelable
+            #     reaches PROVEN.
             if op == "call_indirect":
-                self.unsupported.add(op)
-                return []
+                ind = self.indirect
+                table = ind["table"]
+                type_sigs = ind["type_sigs"]
+                typeidx = ins.imm[0] if isinstance(ins.imm, tuple) else None
+                if table is None or typeidx is None or typeidx >= len(type_sigs):
+                    self.unsupported.add(op); return []
+                impc = ind["import_count"]
+                # an import in the table => host-fn dispatch we don't model => fail closed
+                if any(g < impc for g in table.values()):
+                    self.unsupported.add(op); return []
+                exp = (tuple(type_sigs[typeidx][0]), tuple(type_sigs[typeidx][1]))
+                idx = p.stack.pop()                      # the table index (i32)
+                w = idx.size()
+                out = []
+                matching = []                            # all type-matching defined slots
+                for tidx, g in sorted(table.items()):
+                    li = g - impc
+                    if li < 0 or li >= len(self.funcs):
+                        continue                         # out-of-range slot -> trap region
+                    fti = ind["func_type_idx"][li]
+                    sig = (tuple(type_sigs[fti][0]), tuple(type_sigs[fti][1]))
+                    if sig != exp:
+                        continue                         # type mismatch -> trap region
+                    matching.append(tidx)
+                    pk = p.clone(); pk.cons.append(idx == z3.BitVecVal(tidx, w))
+                    if feasible(pk.cons):
+                        out.extend(self._call_local(li, pk))
+                # trap region: idx is not any valid type-matching slot -> WASM traps -> rollback
+                pt = p.clone()
+                for tidx in matching:
+                    pt.cons.append(idx != z3.BitVecVal(tidx, w))
+                if feasible(pt.cons):
+                    self.rollbacks.append((None, list(pt.cons)))
+                return out
             if op == "call":
                 if ins.imm < len(self.imports):
                     name = self.imports[ins.imm]

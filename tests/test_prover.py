@@ -148,7 +148,7 @@ def test_matrix_verdicts():
 
 def test_decoder_tracks_types():
     from wasm import parse
-    _, fs, _, g = parse(open(os.path.join(H, "agent_guardrail.wasm"), "rb").read())
+    _, fs, _, g, _ = parse(open(os.path.join(H, "agent_guardrail.wasm"), "rb").read())
     hook = next(f for f in fs if f.name == "hook")
     assert 0x7E in hook.localtypes, "i64 local valtype not tracked"
     assert g and g[0][0] == 65536, "global section (stack pointer) not parsed"
@@ -883,6 +883,90 @@ def test_limit_iou_proven_is_non_vacuous():
     for _, cons in e.rollbacks:
         s = z3.Solver(); s.add(*cons, *nm()); s.add(e._float_cmp_c(amtx, limx) == GT)
         assert s.check() == z3.sat, "rollback path unreachable with over-limit amount"
+
+
+# --- call_indirect soundness fixtures (hand-WASM, full control over table+elements) ----
+FUNCREF = 0x70
+
+
+def _indirect_module(codes, table_entries, passive=False):
+    """Module: imports _g/accept/rollback, one handler per `codes` entry (each calls
+    accept(0,0,code)), and hook(i32) that call_indirects through table[arg0] (a symbolic
+    selector). `table_entries` = global func indices placed in the table at offset 0.
+    passive=True emits a flag-1 (passive) element so the table can't be resolved."""
+    t_hook = _ftype([I32], [I64])          # 0
+    t_g    = _ftype([I32, I32], [I32])     # 1
+    t_acc  = _ftype([I32, I32, I64], [I64])# 2
+    t_hand = _ftype([], [I64])             # 3  (the call_indirect type)
+    types = [t_hook, t_g, t_acc, t_hand]
+
+    def _imp(mod, nm, t):
+        return (_uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode()
+                + bytes([0x00]) + _uleb(t))
+    imports = [_imp("env", "_g", 1), _imp("env", "accept", 2), _imp("env", "rollback", 2)]
+    IMPC = 3
+    nh = len(codes)
+    func_types = [_uleb(3)] * nh + [_uleb(0)]            # handlers: type3; hook: type0
+
+    def handler_body(code):
+        b = _i32c(0) + _i32c(0) + _i64c(code) + bytes([0x10]) + _uleb(1) + bytes([0x0B])
+        return _uleb(0) + b                              # call accept(idx 1); end
+    GID = (1 << 31) + 1
+    hook_b = (_i32c(GID & 0xFFFFFFFF) + _i32c(1) + bytes([0x10]) + _uleb(0) + bytes([0x1A])  # _g; drop
+              + bytes([0x20]) + _uleb(0)                                    # local.get 0 (selector)
+              + bytes([0x11]) + _uleb(3) + _uleb(0)                          # call_indirect type3 table0
+              + bytes([0x1A]) + _i64c(0) + bytes([0x0B]))                    # drop; i64.const 0; end
+    bodies = [handler_body(c) for c in codes] + [_uleb(0) + hook_b]
+
+    sec_type = _sec(1, _vec(types))
+    sec_import = _sec(2, _vec(imports))
+    sec_func = _sec(3, _vec(func_types))
+    sec_table = _sec(4, _vec([bytes([FUNCREF, 0x00]) + _uleb(max(1, len(table_entries)))]))
+    sec_mem = _sec(5, _vec([bytes([0x00]) + _uleb(1)]))
+    glob = bytes([I32, 0x01, 0x41]) + _sleb(65536) + bytes([0x0B])
+    sec_global = _sec(6, _vec([glob]))
+    hook_idx = IMPC + nh
+    exp = _uleb(len("hook")) + b"hook" + bytes([0x00]) + _uleb(hook_idx)
+    sec_export = _sec(7, _vec([exp]))
+    if passive:
+        el = _uleb(1) + bytes([0x00]) + _vec([_uleb(g) for g in table_entries])
+    else:
+        el = _uleb(0) + _i32c(0) + bytes([0x0B]) + _vec([_uleb(g) for g in table_entries])
+    sec_elem = _sec(9, _vec([el]))
+    sec_code = _sec(10, _vec([_uleb(len(b)) + b for b in bodies]))
+    return (b"\x00asm" + struct.pack("<I", 1) + sec_type + sec_import + sec_func + sec_table +
+            sec_mem + sec_global + sec_export + sec_elem + sec_code)
+
+
+def test_call_indirect_safe_dispatch_proves():
+    # both reachable targets accept with code 0 -> no unsafe accept; table fully resolved.
+    e = Engine(_indirect_module(codes=[0, 0], table_entries=[3, 4])); e.run()
+    assert "call_indirect" not in e.unsupported, "resolved indirect call must not be unsupported"
+    assert e.accepts, "the indirect call should reach an accept"
+    assert {c for c, _ in e.accepts} == {0}, "only the safe code-0 target should be accepted"
+
+
+def test_call_indirect_unsafe_target_is_explored():
+    # DECISIVE: a dispatch table with one unsafe target (accepts code 999) must NOT be
+    # silently dropped — the fork explores it, so a driver checking "code != 999" finds it.
+    e = Engine(_indirect_module(codes=[0, 999], table_entries=[3, 4])); e.run()
+    assert "call_indirect" not in e.unsupported
+    codes = {c for c, _ in e.accepts}
+    assert 999 in codes, "the unsafe indirect target was dropped — would yield a FALSE proof"
+
+
+def test_call_indirect_oob_traps_not_accepts():
+    # symbolic selector over a 2-entry table: out-of-bounds indices must TRAP (rollback),
+    # never accept. So a rollback path exists and no accept came from an OOB index.
+    e = Engine(_indirect_module(codes=[0, 0], table_entries=[3, 4])); e.run()
+    assert e.rollbacks, "out-of-bounds indirect index must trap to a rollback path"
+    assert "call_indirect" not in e.unsupported
+
+
+def test_call_indirect_unresolved_table_is_inconclusive():
+    # a passive (flag-1) element section can't be resolved -> fail closed to INCONCLUSIVE.
+    e = Engine(_indirect_module(codes=[0, 0], table_entries=[3, 4], passive=True)); e.run()
+    assert "call_indirect" in e.unsupported, "unresolved table must force INCONCLUSIVE, not PROVEN"
 
 
 if __name__ == "__main__":
