@@ -198,28 +198,26 @@ Invariants: `limit` · `guardrail` · `termination` · `monotonic` · `nospend` 
 `xahc prove` locates the prover via `$XAHC_PROVER_DIR` (or a sibling checkout) and
 runs it against the built WASM.
 
-### Reproducing a verdict on-chain
+### Verified on-chain (real testnet transactions)
 
-Each Prover verdict is **reproducible on Xahau testnet** — install the hook, send
-the transaction the verdict describes, and read the ledger's `engine_result`. The
-table below is the *expected* ledger behavior each verdict predicts; run it yourself
-to confirm:
+The prover's verdicts were reproduced on **Xahau testnet** (NetworkID 21338): install
+the hook, send the transaction the verdict describes, read the ledger's `engine_result`.
+**All six cases agree** — full hashes, ledger indices, and explorer links in
+[docs/TESTNET-PROOF.md](docs/TESTNET-PROOF.md).
 
-| hook | invariant | Prover | expected ledger result (reproduce) |
-|---|---|---|---|
-| correct | spend-limit | PROVEN safe | `tecHOOK_REJECTED` (rejects the over-limit pay) |
-| inverted-compare bug | spend-limit | COUNTEREXAMPLE | **`tesSUCCESS`** (the ledger accepts the over-limit pay) |
-| `termination_bug`, drops%256=64 | guard-termination | COUNTEREXAMPLE | `tecHOOK_REJECTED`, `HookReturnCode` = guard-kill code |
-| `termination_bug`, drops%256=4 | guard-termination | within budget → accept | **`tesSUCCESS`** |
+| invariant | case | prover | on-chain `engine_result` | tx | agree |
+|---|---|---|---|---|:--:|
+| spend-limit | under-limit (3 XAH) | accept | `tesSUCCESS` | `64D035B6…F3D7ED` | ✓ |
+| spend-limit | **over-limit (10 XAH)** | never accepts | `tecHOOK_REJECTED` | `8AA5CB5C…BA4DA88` | ✓ |
+| dst-lock | allowed dest | accept | `tesSUCCESS` | `141017F1…12DAC95` | ✓ |
+| dst-lock | **disallowed dest** | reject | `tecHOOK_REJECTED` | `425DE99C…65001` | ✓ |
+| guard-termination | **loop overrun** | GUARD_VIOLATION | `tecHOOK_REJECTED`, `HookReturnCode=0x80…10` | `EE95C114…49B9A6` | ✓ |
+| guard-termination | in-budget | accept | `tesSUCCESS` | `44A36D55…E74207` | ✓ |
 
-To verify: install the hook, send a 10 XAH payment against a 5 XAH limit (and, for
-the termination cases, an amount whose last byte is > 8 vs ≤ 8), then read
-`engine_result`. The guard-termination prediction is that the attack amount (last
-byte > 8) triggers a `GUARD_VIOLATION` while an in-budget amount goes through; the
-hook has no `rollback()`, so a kill can only be the guard.
-
-> **TODO:** paste the concrete testnet tx hashes / ledger indices here once a run is
-> recorded. The verdicts above are reproducible, not yet pinned to published hashes.
+Case 3 (overrun) is decisive: `HookReturnCode`'s top bit is set = `GUARD_VIOLATION`, and
+`termination_bug` has no `rollback()`, so the kill can only be the guard the prover
+predicted. (IOU/`limit_iou` not yet run on-chain — needs a trustline/issuer setup; see the
+proof doc.)
 
 ## How it works
 
