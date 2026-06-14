@@ -721,6 +721,142 @@ def test_no_symbolic_float_op_ever_reaches_proven():
     assert rc == 3
 
 
+# --- ADVERSARIAL re-verification of the IOU-conservation fail-closed fix --------
+# (commit ae415fc: prove_conservation no longer returns a false PROVEN for any
+#  hook that creates IOU value. These hooks are the attacks; each MUST be 3, never 0.)
+
+def test_conservation_mixed_native_and_iou_emit_is_not_proven():
+    # DECISIVE FALL-THROUGH ATTACK: one accepting path emits BOTH a clean native
+    # payment (forward HALF the incoming drops — conserves on the native axis) AND
+    # an IOU payment (1.5 USD minted from nothing). If `iou_emitting` only looked at
+    # the native list, control would fall through to the NATIVE branch, prove
+    # `drops/2 <= drops`, and IGNORE the value-creating IOU emit -> a FALSE PROVEN.
+    # The global iou_emitting guard must fire FIRST and force INCONCLUSIVE.
+    rc = prove_conservation.main(os.path.join(H, "emit_mixed_native_iou.wasm"))
+    assert rc == 3, f"mixed native+IOU emit MUST be INCONCLUSIVE(3), got {rc}"
+    assert rc != 0, "FATAL: native+IOU mixed emit fell through to a FALSE PROVEN"
+
+
+def test_conservation_per_path_split_native_vs_iou_is_not_proven():
+    # PER-PATH SPLIT ATTACK: path A (even drops) emits a clean conserving native
+    # forward; path B (odd drops) mints an IOU from nothing. A driver that proved
+    # path A while skipping the IOU on path B would falsely PROVE. The IOU emit on
+    # ANY accepting path must taint the WHOLE verdict to INCONCLUSIVE.
+    rc = prove_conservation.main(os.path.join(H, "emit_split_native_iou.wasm"))
+    assert rc == 3, f"per-path native|IOU split MUST be INCONCLUSIVE(3), got {rc}"
+    assert rc != 0, "FATAL: per-path IOU emit was skipped -> FALSE PROVEN"
+
+
+def test_conservation_iou_classifier_confusion_never_proves():
+    # PARSER-CONFUSION ATTACK: a PURE IOU emit whose 20-byte currency code has
+    # byte[0] == 0x68 collides with the sfFee header at offset 44 — the exact byte
+    # the engine uses to tell native from issued. The classifier IS fooled (reads it
+    # as native), but the IOU value word (bit63 set) parsed as "drops" is always
+    # >= ~1.9e16 while incoming drops are symbolic (solver picks 0). So the verdict
+    # is never PROVEN: it is either ERROR(1, no incoming amount), INCONCLUSIVE(3), or
+    # a (correctly non-PROVEN) COUNTEREXAMPLE(2). The cardinal sin — PROVEN(0) — must
+    # NOT occur. (Documents that the misclassification is non-exploitable for soundness.)
+    rc1 = prove_conservation.main(os.path.join(H, "emit_iou_currency_collision.wasm"))
+    assert rc1 != 0, f"FATAL: colliding-currency IOU reached PROVEN, got {rc1}"
+    assert rc1 in (1, 2, 3), f"unexpected verdict {rc1}"
+    # the sharp version reads an incoming native amount (passes the no-amount guard) and
+    # picks a tiny XFL; even so the masked value word is huge -> CEX, never PROVEN.
+    rc2 = prove_conservation.main(os.path.join(H, "emit_iou_collision_reads_amt.wasm"))
+    assert rc2 != 0, f"FATAL: colliding-currency IOU (reads amt) reached PROVEN, got {rc2}"
+    assert rc2 in (2, 3), f"unexpected verdict {rc2}"
+
+
+def test_conservation_iou_emit_min_value_word_is_strictly_positive():
+    # ENGINE-LEVEL backstop for the classifier-confusion case: the smallest NORMALIZED
+    # XFL, serialized as an issued value word (bit63 set) and masked to native drops
+    # (top byte & 0x3F), is still strictly positive (~1.9e16). So a misclassified IOU
+    # can never present as 0 drops, hence can never satisfy `total <= incoming` for the
+    # symbolic incoming=0 case -> never a false PROVEN via misclassification.
+    smallest = xfl.encode(1, xfl.MIN_MANT, -96)          # +, min mantissa, min exponent
+    word = smallest | (1 << 63)                          # is-issued bit set (what float_sto writes)
+    extracted = word & ((0x3F << 56) | ((1 << 56) - 1))  # top byte & 0x3F, low 7 bytes kept
+    assert extracted > 0, "misclassified IOU could present as 0 drops (soundness hole)"
+    assert extracted >= 10 ** 15, "expected normalized mantissa floor in extracted drops"
+
+
+# --- ADVERSARIAL re-verification of the read-site normalize-XFL fix -------------
+# (commit ae415fc: incoming issued amount constrained to _float_normalized at the
+#  otxn_field 48-byte read. The constraint must EXCLUDE only impossible denormals,
+#  never a real over-limit counterexample.)
+
+def test_normalize_constraint_does_not_hide_inverted_cex():
+    # The inverted IOU limit must STILL be a real CEX, and the witness must be a
+    # genuinely over-limit pair under the engine's own XFL ordering — proving the
+    # added normalize constraint did not suppress the counterexample.
+    assert prove_limit_iou.main(os.path.join(H, "limit_iou_inverted.wasm")) == 2
+    e = Engine(open(os.path.join(H, "limit_iou_inverted.wasm"), "rb").read()); e.run()
+    amtx = e.inputs["amt_xfl"]
+    lim = e.inputs["param:LIM"]
+    limx = z3.Concat(*lim[:8]) & z3.BitVecVal(0x7FFFFFFFFFFFFFFF, 64)
+    eng_cmp = e._float_cmp_c(amtx, limx)
+    found_positive = False
+    for code, cons in e.accepts:
+        s = z3.Solver(); s.add(*cons)
+        s.add(eng_cmp == z3.BitVecVal(1, 8))             # amt > LIM (the violation)
+        s.add(e._float_normalized(amtx)); s.add(e._float_normalized(limx))
+        s.add(z3.Extract(62, 62, amtx) == 1)             # POSITIVE amt (XFL sign bit 62)
+        s.add(z3.Extract(62, 62, limx) == 1)             # POSITIVE LIM
+        s.add(amtx != 0); s.add(limx != 0)
+        if s.check() == z3.sat:
+            m = s.model()
+            av = m.eval(amtx, model_completion=True).as_long()
+            lv = m.eval(limx, model_completion=True).as_long()
+            # cross-check with the independent reference comparator
+            assert xfl.floatCmp(av, lv) == 1, "witness is not actually over-limit"
+            found_positive = True
+    assert found_positive, "normalize constraint hid the natural positive over-limit CEX"
+
+
+def test_normalize_constraint_keeps_eqonly_violation_findable():
+    # An IOU limit that only rejects amt == LIM (mode 1 EQ) ACCEPTS a whole family of
+    # NORMALIZED over-limit amounts. If the read-site normalize constraint wrongly
+    # excluded any of them this would falsely PROVE; it must be CEX(2).
+    rc = prove_limit_iou.main(os.path.join(H, "limit_iou_eqonly.wasm"))
+    assert rc == 2, f"EQ-only broken IOU limit MUST be a COUNTEREXAMPLE(2), got {rc}"
+
+
+def test_normalize_constraint_admits_both_signs_of_normalized_xfl():
+    # SOUNDNESS of the restriction: _float_normalized must admit EVERY canonical XFL
+    # the host can produce (both signs, mantissa floor/ceiling, exponent range) and
+    # reject ONLY non-canonical encodings (here: the denormal zero-mantissa word the
+    # host never emits). Admitting a real value is what guarantees no CEX is hidden.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    samples = [
+        xfl.encode(1, xfl.MIN_MANT, -96), xfl.encode(-1, xfl.MIN_MANT, -96),
+        xfl.encode(1, xfl.MAX_MANT - 1, 80), xfl.encode(-1, xfl.MAX_MANT - 1, 80),
+        xfl.encode(1, 5_000_000_000_000_000, 0), xfl.encode(-1, 5_000_000_000_000_000, 0),
+        0,
+    ]
+    for v in samples:
+        s = z3.Solver(); s.add(e._float_normalized(z3.BitVecVal(v & ((1 << 64) - 1), 64)))
+        assert s.check() == z3.sat, f"normalized constraint wrongly EXCLUDED a real XFL {v}"
+    # a denormal the host never produces must be rejected (no spurious CEX possible)
+    denormal = (1 << 62) | (97 << 54) | 0
+    s = z3.Solver(); s.add(e._float_normalized(z3.BitVecVal(denormal, 64)))
+    assert s.check() == z3.unsat, "denormal must be excluded by the normalize constraint"
+
+
+def test_dsl_xfl_operands_are_only_normalized_or_concrete():
+    # The DSL feeds _float_cmp_c only two XFL sources: `iou_amount` (read-site
+    # normalized, prover.py:302) and `xfl(...)` literals (concrete/canonical). Confirm
+    # there is no third symbolic XFL producer that could reach the compare un-normalized.
+    import re
+    src = open(os.path.join(ROOT, "src", "prover.py")).read()
+    # amt_xfl is written exactly once, and on the line BEFORE it the read is normalized.
+    writes = [i for i, ln in enumerate(src.splitlines()) if 'self.inputs["amt_xfl"]' in ln]
+    assert len(writes) == 1, "amt_xfl written in more than one place — re-audit normalization"
+    lines = src.splitlines()
+    window = "\n".join(lines[max(0, writes[0] - 4):writes[0] + 1])
+    assert "_float_normalized(xflv)" in window, "amt_xfl read site is not normalized"
+    # every _float_cmp_c symbolic operand site in the engine normalizes first
+    assert src.count("_float_normalized(a)") >= 1 and src.count("_float_normalized(b)") >= 1
+
+
 def _norm_xfl_sample():
     """A dense, boundary-heavy sample of *normalized* XFL int64 values: both signs,
     exponent min/max (-96..80), mantissa boundaries (1e15, 1e16-1), zero, and
