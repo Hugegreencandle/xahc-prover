@@ -47,6 +47,23 @@ python src/prove_limit.py hooks/limit_inverted.wasm 600000000000000000  # invert
 The prover distinguishes a **theoretical** counterexample (needs more drops than
 exist) from a **reachable** one — so you're not chasing bugs that can't happen.
 
+### The headline: the *real deployed* guardrail is proven
+
+```sh
+python src/prove_guardrail.py hooks/agent_guardrail.wasm
+# ✅ PROVEN — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.
+```
+
+This is the **actual `agent_guardrail` hook** deployed on Xahau testnet — multiple
+guarded loops (the 20-byte outgoing-account check), the `otxn_type`/incoming
+branches, the optional destination lock — symbolically executed across all 5 paths
+and proven. Flip one comparison and the prover hands back the attack transaction:
+
+```sh
+python src/prove_guardrail.py hooks/agent_guardrail_buggy.wasm 600000000000000000
+# ❌ COUNTEREXAMPLE — guardrail ACCEPTS an over-limit OUTGOING payment: drops=… > LIM=15
+```
+
 ### Verified on-chain
 
 Every Prover verdict was confirmed on **Xahau testnet** — install the hook, send a
@@ -76,16 +93,17 @@ The symbolic inputs (`sfAmount` bytes, the `LIM` param, the account) are free
 variables; a *spec* (`drops = bytes big-endian`, `accept ⟹ drops ≤ LIM`) is checked
 against every accepting path. A SAT result is a concrete attack transaction.
 
-## Status — MVP
+## Status
 
-Proves the **spend-limit** invariant on single-function hooks today (the class that
-matters most for agent guardrails). Real symbolic execution of compiled WASM, not a
-mock.
+Proves the **spend-limit** invariant — including on the **real `agent_guardrail`**
+(loops, branches, optional destination lock), the hook actually deployed on testnet.
+Real symbolic execution of compiled WASM, not a mock.
 
 Roadmap:
-- more invariants: destination allowlist, state monotonicity, **guard-termination**
-  (prove no `GUARD_VIOLATION` for any input)
-- multi-function hooks (inline local calls) → the full `agent_guardrail`
+- more invariants: destination allowlist (prove `DST` lock holds), state
+  monotonicity, **guard-termination** (prove no `GUARD_VIOLATION` for any input)
+- multi-function hooks via local-call inlining (the guardrail inlines to one fn at
+  `-O2`; larger hooks will need explicit inlining)
 - an invariant DSL so you write the property in one line
 - `xahc prove` integration so it's one command from source
 
