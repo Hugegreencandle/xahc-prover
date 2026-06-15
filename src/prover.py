@@ -56,7 +56,8 @@ class Terminal(Exception):
 
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
-                 "emit_count", "emits", "emits_iou", "fees", "fsets")
+                 "emit_count", "emits", "emits_iou", "fees", "fsets",
+                 "reserve_n", "reserve_calls")
 
     def __init__(self):
         self.stack: list = []
@@ -71,6 +72,15 @@ class Path:
         self.emits_iou: list = [] # emitted IOU value as (xfl_bv, cur, iss) or None per emit
         self.fees: list = []      # per-emit base fee (BitVec64) charged to the emitting acct
         self.fsets: list = []     # foreign-state-set events: (acct_bytes|None, granted:Bool, ret)
+        # ---- #7 emission-burden (etxn_reserve count) ----
+        # The emit budget the hook DECLARED via etxn_reserve(n). xahaud semantics: the FIRST
+        # successful etxn_reserve(n) binds the budget; a second call returns -8 ALREADY_SET and
+        # binds nothing. emit() fails -13 TOO_MANY_EMITTED_TXN once emit_count would exceed it.
+        # reserve_n = the BitVec64 `n` from the FIRST etxn_reserve on the path, or None if the
+        # hook never reserved (budget 0 -> any emit overflows). reserve_calls counts the calls
+        # so the driver can fail closed on a second (symbolic-binding-ambiguous) reservation.
+        self.reserve_n = None     # BitVec64 declared emit budget (first etxn_reserve), or None
+        self.reserve_calls: int = 0  # how many etxn_reserve calls occurred on this path
 
     def clone(self) -> "Path":
         p = Path()
@@ -86,6 +96,8 @@ class Path:
         p.emits_iou = list(self.emits_iou)
         p.fees = list(self.fees)
         p.fsets = list(self.fsets)
+        p.reserve_n = self.reserve_n
+        p.reserve_calls = self.reserve_calls
         return p
 
 
@@ -117,7 +129,17 @@ class Engine:
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
+        # ---- #7 emission-burden ----
+        # Per accepting path: (cons, emit_count:int, reserve_n:BitVec64|None, reserve_calls:int).
+        # reserve_n is the declared emit budget from the FIRST etxn_reserve(n) (None = the hook
+        # never reserved -> budget 0). The driver proves accept => emit_count <= reserved.
+        self.emission_on_accept: list = []
         self.hook = next(f for f in self.funcs if f.name == "hook")
+        # #7 emission-burden: does this module EXPORT a callback (`cbak`)? A cbak runs when an
+        # emitted txn settles and can itself emit / set hook_again, so the emission burden can
+        # grow across re-entries the engine does NOT model. The emission driver uses this to
+        # fail closed (INCONCLUSIVE) — it only proves the STATIC per-invocation reserve bound.
+        self.has_cbak = any(getattr(f, "name", None) == "cbak" for f in self.funcs)
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
         # unroll bound. If True, the analysis is INCOMPLETE and must NOT claim
@@ -479,7 +501,24 @@ class Engine:
             self.inputs.setdefault("ledger_nonce", []).extend(bs)
             st.append(z3.BitVecVal(n, 64)); return
         if name == "etxn_reserve":
-            n = st.pop(); st.append(z3.BitVecVal(1, 64)); return     # success
+            # etxn_reserve(count) declares the emit budget. xahaud: the FIRST call binds the
+            # budget and returns the count; a SECOND call returns -8 ALREADY_SET and binds
+            # nothing (once-per-execution). We CAPTURE the first call's `n` (concrete or
+            # symbolic, widened to 64-bit) so the emission-burden driver can check
+            # emit_count <= reserved per accepting path. Modeling the -8 on a re-call lets a
+            # hook that does `if (etxn_reserve(2) < 0) rollback;` after an earlier reserve
+            # branch correctly.
+            n = st.pop()
+            if n.size() != 64:
+                n = z3.ZeroExt(64 - n.size(), n) if n.size() < 64 else z3.Extract(63, 0, n)
+            p.reserve_calls += 1
+            if p.reserve_calls == 1:
+                p.reserve_n = n
+                st.append(n)                                         # returns the count (>=0)
+            else:
+                # ALREADY_SET (-8): the binding budget is still the first call's value.
+                st.append(z3.BitVecVal((-8) & ((1 << 64) - 1), 64))
+            return
         if name == "etxn_details":
             wlen = conc(st.pop()); wptr = conc(st.pop())
             n = min(wlen, 138)                                       # emit-details blob
@@ -691,6 +730,8 @@ class Engine:
                 self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
                 self.fees_on_accept.append((list(p.cons), list(p.fees), p.emit_count))
                 self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))
+                self.emission_on_accept.append(
+                    (list(p.cons), p.emit_count, p.reserve_n, p.reserve_calls))
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()

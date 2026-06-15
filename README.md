@@ -199,12 +199,23 @@ python src/prove_foreign_authz.py hooks/foreign_authz_bug.wasm
 python src/prove_time_nonce.py hooks/time_nonce_bug.wasm
 # ❌ COUNTEREXAMPLE — an accept decision DEPENDS on ledger_nonce (a grindable lottery seed).
 #    time_nonce_ok uses a legitimate ledger_seq deadline (never the nonce) → ✅ PROVEN.
+
+python src/prove_emission.py hooks/emission_bug.wasm
+# ❌ COUNTEREXAMPLE — an accepting path emits 2 but reserved only 1 (etxn_reserve(1))
+#    → runtime -13 TOO_MANY_EMITTED_TXN. emission_ok reserves 2 and emits 2 → ✅ PROVEN.
+
+python src/prove_emission.py hooks/emission_cbak.wasm
+# ⚠️ INCONCLUSIVE — the hook exports a `cbak` callback (the re-entry surface). The dynamic
+#    emission chain is NOT modeled, so the driver refuses to claim PROVEN (fail closed).
 ```
 
 Scope honesty: `time-nonce` proves no accept hinges on `ledger_nonce`; it does **not** flag
 `ledger_seq`/`ledger_last_time` deadlines (escrow-style time gates are legitimate). `reserve`
-models the account's own emits + fees as the outflow. Both fail closed to INCONCLUSIVE on
-anything they can't model (e.g. a non-20-byte foreign target, an unparsed emit).
+models the account's own emits + fees as the outflow. `emission` proves only the **static**
+per-invocation reserve-count bound (accept ⟹ emit_count ≤ etxn_reserve(n)); it explicitly
+does **not** prove the dynamic `cbak`-re-entry emission chain — if a hook exports `cbak` the
+verdict is INCONCLUSIVE, never PROVEN. All fail closed to INCONCLUSIVE on anything they can't
+model (e.g. a non-20-byte foreign target, an unparsed emit, an exported cbak callback).
 
 ## State a property in one line — the invariant DSL
 
@@ -235,7 +246,9 @@ xahc prove myhook.wasm --invariant conservation
 xahc prove limit.wasm --invariant limit -- 600000000000000000   # forward args after --
 ```
 
-Invariants: `limit` · `guardrail` · `termination` · `monotonic` · `nospend` · `conservation`.
+Invariants: `limit` · `guardrail` · `termination` · `monotonic` · `nospend` · `conservation` ·
+`limit-iou` · `authz` · `validate` · `overflow` · `foreign-authz` · `reserve` · `time-nonce` ·
+`emission`.
 
 `xahc prove` locates the prover via `$XAHC_PROVER_DIR` (or a sibling checkout) and
 runs it against the built WASM.
@@ -332,7 +345,7 @@ guessed.
 
 ## Status
 
-Proves thirteen invariants — **spend-limit**, **destination-allowlist**,
+Proves fourteen invariants — **spend-limit**, **destination-allowlist**,
 **guard-termination** (no `GUARD_VIOLATION`), **state-monotonicity** (persisted
 values never move backwards), **no-double-spend** (bounded emit count),
 **balance-conservation** (emits ≤ received), **IOU/issued-amount limit** (XFL),
@@ -341,7 +354,9 @@ values never move backwards), **no-double-spend** (bounded emit count),
 wrap can't bypass the limit check — SC07/09; scoped to the limit, not all arithmetic),
 **reserve safety** (accept never drives the account below base + owner_count×increment — `-38`),
 **foreign-state authorization** (no accept after an un-granted `state_foreign_set` — SC01 / `-34`),
-and **time/nonce dependence** (no accept hinges on the grindable `ledger_nonce` — SC03/09) — on
+**time/nonce dependence** (no accept hinges on the grindable `ledger_nonce` — SC03/09),
+and **emission-burden** (accept ⟹ emit_count ≤ `etxn_reserve(n)`, the static per-invocation
+reserve-count bound — `-13`; fail-closed/INCONCLUSIVE on any `cbak` re-entry, never PROVEN there) — on
 real compiled WASM including the
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
@@ -353,7 +368,9 @@ Roadmap:
 - ~~invariant DSL~~ ✅ done — see below
 - ~~richer state model — reserve safety (`-38`), foreign-state authorization (`-34`),
   time/nonce dependence~~ ✅ done (invariants #5/#6/#8 in `docs/INVARIANT-CANDIDATES.md`)
-- **emission-burden via `cbak` re-entry** (#7) — needs cbak + generation modeling
+- ~~emission-burden — static reserve-count bound (`-13`)~~ ✅ done (`prove_emission`, #7) for the
+  STATIC part; the **dynamic `cbak`-re-entry generation bound** still needs cbak + generation
+  modeling (deferred — never faked: a cbak export forces INCONCLUSIVE today)
 - **`call_indirect` to host imports / unresolvable tables** — currently fail closed; model
   if a real hook needs them
 

@@ -15,6 +15,7 @@ import prove_nospend, prove_conservation                                  # noqa
 import prove_limit_iou                                                    # noqa: E402
 import prove_authz, prove_validate, prove_overflow                        # noqa: E402
 import prove_foreign_authz, prove_reserve, prove_time_nonce               # noqa: E402
+import prove_emission                                                      # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -155,6 +156,13 @@ def test_matrix_verdicts():
     # time/nonce dependence (SC03/09): ledger_seq deadline ok -> PROVEN, nonce lottery -> CEX
     assert prove_time_nonce.main(os.path.join(H, "time_nonce_ok.wasm")) == 0
     assert prove_time_nonce.main(os.path.join(H, "time_nonce_bug.wasm")) == 2
+    # emission burden (-13 TOO_MANY_EMITTED_TXN): accept => emit_count <= reserved (static).
+    #   ok   -> reserves 2, emits 2, no cbak               -> PROVEN (0)
+    #   bug  -> reserves 1, emits 2                          -> COUNTEREXAMPLE (2)
+    #   cbak -> exports cbak + emits (dynamic re-entry)      -> INCONCLUSIVE / fail-closed (3)
+    assert prove_emission.main(os.path.join(H, "emission_ok.wasm")) == 0
+    assert prove_emission.main(os.path.join(H, "emission_bug.wasm")) == 2
+    assert prove_emission.main(os.path.join(H, "emission_cbak.wasm")) == 3
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
@@ -338,6 +346,179 @@ def test_reserve_adversarial_iou_emit_fails_closed():
     # returns None (unparsed) -> outflow unbounded -> must FAIL CLOSED (INCONCLUSIVE 3),
     # never PROVEN. Confirms the unparsed-emit gate precedes any PROVEN.
     assert prove_reserve.main(os.path.join(H, "adv_reserve_iou.wasm")) == 3
+
+
+# --- #7 emission-burden (-13 TOO_MANY_EMITTED_TXN): the etxn_reserve count capture ----------
+
+def test_emission_engine_captures_reserve_count():
+    # The engine must CAPTURE the etxn_reserve(n) argument per accepting path and the exact
+    # emit_count. Pin both for the three fixtures so a regression in the capture is caught here,
+    # not only via the driver verdict.
+    def info(name):
+        e = Engine(open(os.path.join(H, name), "rb").read()); e.run()
+        assert len(e.emission_on_accept) == 1, name
+        cons, ec, rn, rc = e.emission_on_accept[0]
+        rv = z3.simplify(rn).as_long() if rn is not None else None
+        return e.has_cbak, ec, rv, rc
+    assert info("emission_ok.wasm")   == (False, 2, 2, 1)   # reserves 2, emits 2
+    assert info("emission_bug.wasm")  == (False, 2, 1, 1)   # reserves 1, emits 2  (over budget)
+    has_cbak, ec, rv, rc = info("emission_cbak.wasm")
+    assert has_cbak is True                                 # cbak export = dynamic re-entry
+
+
+def test_emission_ok_is_proven():
+    # Reserves 2, emits exactly 2, no cbak -> the static bound holds for all inputs -> PROVEN.
+    assert prove_emission.main(os.path.join(H, "emission_ok.wasm")) == 0
+
+
+def test_emission_bug_is_counterexample():
+    # Reserves 1 but emits 2 -> emit_count (2) > reserved (1) is feasible on the accept path
+    # -> COUNTEREXAMPLE. (Runtime -13 TOO_MANY_EMITTED_TXN.)
+    assert prove_emission.main(os.path.join(H, "emission_bug.wasm")) == 2
+
+
+def test_emission_cbak_fails_closed_never_proven():
+    # THE PRIME-DIRECTIVE TEST. A hook that exports cbak AND emits exposes the dynamic re-entry
+    # emission chain the engine does NOT model. The driver MUST return INCONCLUSIVE (3) — a 0
+    # here would be a FALSE PROVEN of an unproven dynamic property (catastrophic).
+    rc = prove_emission.main(os.path.join(H, "emission_cbak.wasm"))
+    assert rc == 3, ("emission_cbak returns %d — MUST be 3 (INCONCLUSIVE/fail-closed). A 0 is a "
+                     "FALSE PROVEN: the cbak/re-entry emission chain is not modeled." % rc)
+    assert rc != 0, "cbak-exporting emitter must NEVER reach PROVEN on the emission invariant"
+
+
+def test_emission_any_cbak_emitter_fails_closed():
+    # The fail-closed gate keys on the cbak EXPORT itself, not on the fixture's internals.
+    # Existing cbak-exporting emitters (emit_forward emits 1, emit_double emits 2) must BOTH
+    # fail closed under the emission driver — never PROVEN — because cbak re-entry is unmodeled.
+    assert prove_emission.main(os.path.join(H, "emit_forward.wasm")) == 3
+    assert prove_emission.main(os.path.join(H, "emit_double.wasm")) == 3
+
+
+def test_emission_no_reserve_at_all_would_be_counterexample():
+    # SOUNDNESS of the "never reserved -> budget 0" rule: a (cbak-free) accepting path with
+    # emit_count > 0 and reserve_n is None must be flagged. We synthesize that engine state
+    # directly (no toolchain needed) and confirm the driver reports a COUNTEREXAMPLE, since
+    # emitting without any etxn_reserve is itself a guaranteed -13 at runtime.
+    e = Engine(open(os.path.join(H, "emission_ok.wasm"), "rb").read()); e.run()
+    e.has_cbak = False
+    e.float_overapprox = set(); e.unsupported = set(); e.hit_bound = False
+    # one accept path: emitted once, NEVER reserved (reserve_n=None, reserve_calls=0)
+    e.emission_on_accept = [([], 1, None, 0)]
+    import io, contextlib
+    # Drive the real driver against a stubbed Engine constructor that yields our prepared state.
+    orig = prove_emission.Engine
+    try:
+        prove_emission.Engine = lambda *_a, **_k: e
+        with contextlib.redirect_stdout(io.StringIO()):
+            # path must exist (the driver reads bytes before constructing Engine); the stubbed
+            # Engine ignores those bytes and returns our prepared state.
+            verdict = prove_emission.main(os.path.join(H, "emission_ok.wasm"))
+    finally:
+        prove_emission.Engine = orig
+    assert verdict == 2, ("an emit with NO etxn_reserve (budget 0) must be a COUNTEREXAMPLE, got "
+                          "%d" % verdict)
+
+
+# --- #7 ADVERSARIAL emission battery (built to force a FALSE PROVEN; all must hold) ----------
+# Hooks compiled from hooks/atk_*.c. These probe: symbolic/param-controlled reserve_n, the
+# xahaud ALREADY_SET (double-reserve) semantics, no-reserve emits, conditional/loop over-emit,
+# and the cbak fail-closed precedence. A 0 (PROVEN) on any of the over-emit/cbak cases is a
+# catastrophic false PROVEN.
+
+def test_emission_symbolic_n_unguarded_is_counterexample():
+    # The MOST DANGEROUS false-PROVEN candidate: etxn_reserve(param N) with N attacker-controlled
+    # and UNGUARDED, then emit 3 unconditionally. N is unconstrained (0..255) so emit_count(3) >
+    # N is feasible (e.g. N=0,1,2). A symbolic reserve must NOT make the over-emit vacuously safe.
+    assert prove_emission.main(os.path.join(H, "atk_symbolic_n_unguarded.wasm")) == 2
+
+
+def test_emission_symbolic_n_guarded_is_proven_and_nonvacuous():
+    # The dual: same symbolic reserve_n, but REQUIRE(n >= 3) before emitting 3. On every accept
+    # path n >= 3 >= emit_count, so the bound holds -> PROVEN. Must NOT be falsely flagged CEX.
+    assert prove_emission.main(os.path.join(H, "atk_symbolic_n_guarded.wasm")) == 0
+    # And the PROVEN must be NON-VACUOUS: reserve_n is genuinely symbolic, the accept path is
+    # feasible, and emits actually occurred (emit_count > 0) — not a proof over an empty set.
+    e = Engine(open(os.path.join(H, "atk_symbolic_n_guarded.wasm"), "rb").read()); e.run()
+    assert len(e.emission_on_accept) == 1
+    cons, ec, rn, rc = e.emission_on_accept[0]
+    assert ec == 3 and rc == 1
+    assert rn is not None and not isinstance(rn, z3.BitVecNumRef), "reserve_n must be SYMBOLIC"
+    s = z3.Solver(); s.add(*cons)
+    assert s.check() == z3.sat, "accept path must be feasible (non-vacuous PROVEN)"
+    # over-emit is UNSAT only because of the guard, not because the path is dead.
+    s2 = z3.Solver(); s2.add(*cons); s2.add(z3.UGT(z3.BitVecVal(ec, 64), rn))
+    assert s2.check() == z3.unsat
+
+
+def test_emission_signed_guarded_reserve_is_proven():
+    # A 4-byte param read as a SIGNED int32, guarded `n >= 3` (signed), reserved as unsigned.
+    # Soundness hinges on the signed compare: 0xFFFFFFFF (signed -1) must be excluded so the
+    # ZeroExt'd reserve_n can't be a huge unsigned value paired with a "passing" guard.
+    assert prove_emission.main(os.path.join(H, "atk_signed_guard_neg.wasm")) == 0
+    e = Engine(open(os.path.join(H, "atk_signed_guard_neg.wasm"), "rb").read()); e.run()
+    cons, ec, rn, rc = e.emission_on_accept[0]
+    s = z3.Solver(); s.add(*cons); s.add(rn == z3.BitVecVal(0xFFFFFFFF, 64))
+    assert s.check() == z3.unsat, "signed guard must exclude 0xFFFFFFFF (-1)"
+
+
+def test_emission_double_reserve_binds_first_n_smaller_is_counterexample():
+    # xahaud ALREADY_SET semantics: etxn_reserve(1) then etxn_reserve(5) — the SECOND returns -8
+    # and binds nothing; the budget stays the FIRST n (1). Emitting 3 over-runs that 1 -> CEX.
+    # A regression that rebinds to the second (larger) n would falsely PROVEN this.
+    assert prove_emission.main(os.path.join(H, "atk_double_reserve_first_smaller.wasm")) == 2
+    e = Engine(open(os.path.join(H, "atk_double_reserve_first_smaller.wasm"), "rb").read()); e.run()
+    cons, ec, rn, rc = e.emission_on_accept[0]
+    assert rc == 2, "two etxn_reserve calls"
+    assert z3.simplify(rn).as_long() == 1, "bound must be the FIRST reserve's n (ALREADY_SET)"
+
+
+def test_emission_double_reserve_binds_first_n_bigger_is_proven():
+    # The dual: etxn_reserve(3) then etxn_reserve(1) -> budget binds the first (3); emit 3 is OK.
+    assert prove_emission.main(os.path.join(H, "atk_double_reserve_first_bigger.wasm")) == 0
+    e = Engine(open(os.path.join(H, "atk_double_reserve_first_bigger.wasm"), "rb").read()); e.run()
+    cons, ec, rn, rc = e.emission_on_accept[0]
+    assert z3.simplify(rn).as_long() == 3, "bound must be the FIRST reserve's n"
+
+
+def test_emission_no_reserve_real_hook_is_counterexample():
+    # A REAL compiled hook (not a synthesized engine state) that emits without ever calling
+    # etxn_reserve. reserve_n is None (budget 0), emit_count 1 > 0 -> CEX. No cbak.
+    assert prove_emission.main(os.path.join(H, "atk_emit_noreserve.wasm")) == 2
+
+
+def test_emission_conditional_overemit_branch_is_counterexample():
+    # Reserve 1; on the payment branch emit TWICE, on the non-pay branch emit zero. The driver
+    # must explore BOTH accept paths and flag the payment branch (emit 2 > reserve 1).
+    assert prove_emission.main(os.path.join(H, "atk_reserve1_emit2_branch.wasm")) == 2
+
+
+def test_emission_loop_fixed_overemit_is_counterexample():
+    # Reserve 2 but a fixed-bound loop emits 4 -> emit_count(4) > reserved(2) -> CEX.
+    assert prove_emission.main(os.path.join(H, "atk_loop_overemit.wasm")) == 2
+
+
+def test_emission_loop_symbolic_count_not_undercounted():
+    # Reserve 2 but a loop whose trip count is a symbolic byte of drops (0..255) emits up to 255.
+    # The engine must NOT silently undercount emit_count to <= reserve; it must find a path where
+    # emit_count > 2 -> CEX (or fail closed). A PROVEN here would be a catastrophic undercount.
+    assert prove_emission.main(os.path.join(H, "atk_loop_unbounded_emit.wasm")) == 2
+
+
+def test_emission_cbak_safe_emitter_still_inconclusive():
+    # A cbak-exporting hook whose cbak does NOT re-emit and whose static bound holds (reserve 1,
+    # emit 1) is STATICALLY safe — yet the engine does not model cbak re-entry, so it must STILL
+    # be INCONCLUSIVE (3), NEVER PROVEN. We cannot prove what we don't model.
+    rc = prove_emission.main(os.path.join(H, "atk_cbak_safe.wasm"))
+    assert rc == 3, "safe cbak emitter must STILL fail closed (3), never PROVEN"
+    assert rc != 0
+
+
+def test_emission_cbak_gate_precedes_overemit_check():
+    # A cbak-exporting hook that ALSO statically over-emits (reserve 1, emit 3). The cbak
+    # fail-closed gate runs FIRST, so the verdict is INCONCLUSIVE (3), not the CEX (2) — and
+    # crucially never PROVEN. Pins the gate ordering: the dynamic case can never slip to PROVEN.
+    assert prove_emission.main(os.path.join(H, "atk_cbak_overemit.wasm")) == 3
 
 
 def test_foreign_authz_adversarial_multi_set_is_counterexample():

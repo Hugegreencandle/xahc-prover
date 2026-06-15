@@ -34,6 +34,9 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
 - `prove_foreign_authz` — accept ⟹ every `state_foreign_set` was grant-authorized (SC01 / -34)
 - `prove_reserve` — accept ⟹ balance − (emits+fees) ≥ base + owner_count*inc (-38)
 - `prove_time_nonce` — no accept decision hinges on `ledger_nonce` (SC03/09)
+- `prove_emission` — accept ⟹ emit_count ≤ `etxn_reserve(n)` (static reserve-count bound, `-13`).
+  STATIC SCOPE ONLY: fails closed to INCONCLUSIVE whenever the module exports `cbak` (the dynamic
+  re-entry emission chain is NOT modeled — never claim PROVEN there).
 All are reachable via `xahc prove <hook> --invariant <name>` (in the xahc repo).
 
 ## SOUNDNESS IS THE PRODUCT — the one rule that matters

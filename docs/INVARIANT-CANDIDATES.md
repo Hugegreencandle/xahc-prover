@@ -69,10 +69,27 @@ Sources: trailofbits.com (invariant-driven development, 2025-02), owasp.org/www-
 - Fixtures: `foreign_authz_ok` (checks the return, rolls back when unauthorized) → PROVEN;
   `foreign_authz_bug` (ignores the return and accepts) → COUNTEREXAMPLE with the foreign account.
 
-### 7. Emission-burden / no-runaway-emit  ·  OWASP SC10 (DoS) / codes -11,-13 ·  **Now (partial)**
-*accept ⟹ emit count ≤ etxn_reserve AND emission generation/burden stays bounded.*
-- We already prove the count bound (`nospend`). Extend to: a hook can't be driven (via `cbak`
-  re-entry / emitted-txn loops) into an unbounded emission chain. Needs `cbak` + generation modeling.
+### 7. Emission-burden / no-runaway-emit  ·  OWASP SC10 (DoS) / code -13 ·  **DONE — STATIC PART ONLY** (`prove_emission`)
+*accept ⟹ emit_count ≤ the count the hook passed to `etxn_reserve(n)`* (static, per-invocation).
+- Emitting more than reserved is a runtime **-13 TOO_MANY_EMITTED_TXN** (the over-budget emit fails,
+  leaving a partial/failed emission). Emitting at all without ever calling `etxn_reserve` (budget 0)
+  is the same failure.
+- Engine: `etxn_reserve(n)` now CAPTURES its argument — the FIRST call binds the budget (a second
+  returns -8 ALREADY_SET and binds nothing, per xahaud once-per-execution semantics). Per accepting
+  path the engine records `(emit_count, reserve_n, reserve_calls)`; `emit_count` is the exact tracked
+  count (loops unrolled, calls inlined). The module's `cbak` export is detected (`has_cbak`).
+- Driver (`prove_emission`): per accepting path, negate the invariant — ask Z3 whether
+  `emit_count > reserved_n` is feasible under the path constraints. sat → COUNTEREXAMPLE; unknown /
+  unsupported / hit-bound / float-overapprox → INCONCLUSIVE; all UNSAT → PROVEN (static bound).
+- Fixtures: `emission_ok` (reserves 2, emits 2, no cbak) → PROVEN; `emission_bug` (reserves 1, emits 2)
+  → COUNTEREXAMPLE; `emission_cbak` (exports cbak + emits) → INCONCLUSIVE.
+- **SCOPE / explicitly NOT proven — fail closed on the dynamic case.** The candidate's second clause
+  ("emission generation / burden stays bounded under `cbak` re-entry / emitted-txn loops") needs cbak
+  + generation modeling the engine does NOT have. A `cbak` runs when an emitted txn settles and may
+  itself emit / `hook_again`, growing the total burden across re-entries we don't model. So: **if the
+  module exports `cbak`, the driver returns INCONCLUSIVE — NEVER PROVEN** for the unbounded-emission
+  -chain property. A PROVEN is only ever emitted for cbak-free hooks, where the static per-invocation
+  reserve bound IS the whole story. Do NOT describe a PROVEN here as "no runaway emit".
 
 ### 8. Determinism / no insecure time-or-nonce dependence  ·  OWASP SC03+SC09 ·  **DONE** (`prove_time_nonce`)
 *a security decision (accept) must not hinge on `ledger_nonce` in an attacker-influenceable way.*
@@ -88,8 +105,9 @@ Sources: trailofbits.com (invariant-driven development, 2025-02), owasp.org/www-
   `time_nonce_bug` (accepts/"wins" based on a nonce byte) → COUNTEREXAMPLE.
 
 ## Not applicable / low value on Xahau
-- **Reentrancy (SC08)** — Hooks have no synchronous external call; the analog is emit→cbak,
-  covered by #7. **Flash loans (SC04)** — no in-protocol flash-loan primitive. **Proxy/upgrade
+- **Reentrancy (SC08)** — Hooks have no synchronous external call; the analog is emit→cbak, the
+  STATIC count side of which is covered by #7 (the dynamic cbak chain is explicitly out of scope /
+  fail-closed). **Flash loans (SC04)** — no in-protocol flash-loan primitive. **Proxy/upgrade
   (SC10)** — closest analog is guarding `SetHook` itself (a narrow #1 variant).
 
 ## Build order recommendation
@@ -97,8 +115,11 @@ Sources: trailofbits.com (invariant-driven development, 2025-02), owasp.org/www-
 **#6 foreign-state authorization**, and **#8 time/nonce dependence** — SHIPPED (a "richer state
 model" pass: symbolic standing balance + reserve params; `state_foreign[_set]` + grant-gated
 return; symbolic `ledger_seq`/`ledger_last_time`/`ledger_nonce` with a nonce-dependence query).
-Remaining: **#4 IOU conservation** (in flight) and **#7 emission-burden / cbak re-entry** (needs
-cbak + generation modeling).
+**#7 emission-burden** — SHIPPED for the STATIC reserve-count bound (`prove_emission`: accept ⟹
+emit_count ≤ etxn_reserve(n); fail-closed/INCONCLUSIVE whenever `cbak` is exported, since the dynamic
+re-entry chain is unmodeled). Remaining: **#4 IOU conservation** (in flight) and the **dynamic #7
+cbak-re-entry generation bound** (needs cbak + generation modeling — deliberately deferred, never
+faked with a false PROVEN).
 
 Each shipped invariant should follow the repo pattern: a `prove_<name>.py` driver (fail-closed:
 PROVEN/COUNTEREXAMPLE/INCONCLUSIVE), a correct + buggy hook pair in `hooks/`, a regression-test
