@@ -28,6 +28,12 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
 - `prove_monotonic` — state never moves backwards (replay protection)
 - `prove_nospend` — bounded emit count (no double-spend)
 - `prove_conservation` — Σ emitted ≤ received (no value creation)
+- `prove_authz` — accept ⟹ origin == owner (OWASP SC01)
+- `prove_validate` — accept ⟹ required hook_param present (SC05)
+- `prove_overflow` — a uint64 wrap can't bypass the drops+tip limit check (SC07/09)
+- `prove_foreign_authz` — accept ⟹ every `state_foreign_set` was grant-authorized (SC01 / -34)
+- `prove_reserve` — accept ⟹ balance − (emits+fees) ≥ base + owner_count*inc (-38)
+- `prove_time_nonce` — no accept decision hinges on `ledger_nonce` (SC03/09)
 All are reachable via `xahc prove <hook> --invariant <name>` (in the xahc repo).
 
 ## SOUNDNESS IS THE PRODUCT — the one rule that matters

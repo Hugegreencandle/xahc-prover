@@ -38,9 +38,10 @@ invariant?
 → PROVEN (for all inputs in scope), or the exact counterexample transaction.
 
 **5/**
-It proves **10 invariants** on real hooks, including the deployed `agent_guardrail`:
+It proves **13 invariants** on real hooks, including the deployed `agent_guardrail`:
 spend-limit · destination-lock · guard-termination · state-monotonicity · no-double-spend ·
-balance-conservation · IOU limit · authorization · input-validation · overflow-safe limit.
+balance-conservation · IOU limit · authorization · input-validation · overflow-safe limit ·
+reserve safety · foreign-state authorization · time/nonce dependence.
 
 **6/**
 A proof you can't falsify is worthless. So every invariant ships with a one-character-bug
@@ -126,7 +127,8 @@ Capture tool: `asciinema` for crisp terminal, or screen-record + the explorer ta
 > symbolically executes a Hook's compiled WASM and mathematically proves it obeys a safety
 > invariant (spend limits, destination locks, guard-termination, state-monotonicity,
 > no-double-spend, balance-conservation, authorization, input-validation, overflow, IOU
-> limits) for **all** inputs in scope, or returns the exact transaction that breaks it. Six
+> limits, reserve safety, foreign-state authorization, time/nonce dependence) for **all**
+> inputs in scope, or returns the exact transaction that breaks it. Six
 > testnet cases — across three of the invariants (spend-limit, destination-lock,
 > guard-termination) — were reproduced on the live Xahau testnet and agree with the prover. It's
 > the third leg of an open-source trifecta — write (xahc), simulate (xahau-mcp), prove
@@ -136,7 +138,7 @@ Capture tool: `asciinema` for crisp terminal, or screen-record + the explorer ta
 
 ## D) Headline facts (all verifiable in-repo)
 - First Hook verifier (a search for one returns only EVM tools).
-- 10 invariants, each with a falsifiable buggy twin; 66 regression tests.
+- 13 invariants, each with a falsifiable buggy twin; 73 regression tests.
 - 3-lens self-audit + a follow-up audit; **7 false-PROVEN vectors found + fixed**; fails closed.
 - 6/6 testnet cases agree (covering 3 of the invariants) — real hashes in docs/TESTNET-PROOF.md
   (e.g. over-limit reject `8AA5CB5C…BA4DA88`; guard-violation `EE95C114…49B9A6`, HookReturnCode

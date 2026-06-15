@@ -182,6 +182,30 @@ python src/prove_overflow.py hooks/overflow_bug.wasm
 The `authz` / `validate` / `overflow` correct variants all prove `✅ PROVEN`. See
 `docs/INVARIANT-CANDIDATES.md` for the sourced backlog these came from.
 
+### A richer state model — reserve safety, foreign-state authz, time/nonce dependence
+
+Three more invariants that needed the engine to model account balance/reserve,
+`state_foreign[_set]` + its grant-gated return, and the ledger time/nonce host fns:
+
+```sh
+python src/prove_reserve.py hooks/reserve_bug.wasm
+# ❌ COUNTEREXAMPLE — emits without leaving reserve: balance − (emits+fees) < base + owner_count*inc
+#    (-38 RESERVE_INSUFFICIENT). reserve_ok checks headroom first → ✅ PROVEN.
+
+python src/prove_foreign_authz.py hooks/foreign_authz_bug.wasm
+# ❌ COUNTEREXAMPLE — accepts after a state_foreign_set returned NOT_AUTHORIZED (-34): it
+#    wrote ANOTHER account's state with no HookGrant. foreign_authz_ok checks the return → PROVEN.
+
+python src/prove_time_nonce.py hooks/time_nonce_bug.wasm
+# ❌ COUNTEREXAMPLE — an accept decision DEPENDS on ledger_nonce (a grindable lottery seed).
+#    time_nonce_ok uses a legitimate ledger_seq deadline (never the nonce) → ✅ PROVEN.
+```
+
+Scope honesty: `time-nonce` proves no accept hinges on `ledger_nonce`; it does **not** flag
+`ledger_seq`/`ledger_last_time` deadlines (escrow-style time gates are legitimate). `reserve`
+models the account's own emits + fees as the outflow. Both fail closed to INCONCLUSIVE on
+anything they can't model (e.g. a non-20-byte foreign target, an unparsed emit).
+
 ## State a property in one line — the invariant DSL
 
 Instead of a Python driver, write the property directly:
@@ -296,7 +320,7 @@ each now covered by a regression test:
 The remaining gaps (symbolic memory addresses, unresolvable element tables,
 table-slot-to-import, recursion past the depth cap) all **fail closed** — they drive the
 verdict to INCONCLUSIVE, and unsupported decodes raise; never a silent certificate.
-Regression tests in `tests/` (49). Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
+Regression tests in `tests/` (73). Verdicts: `PROVEN` / `COUNTEREXAMPLE` / `INCONCLUSIVE`.
 
 The engine's hard-coded constants were cross-checked against ground truth
 (`XRPLF/hook-macros` `hookapi.h` + `sfcodes.h`, and a `float_one` decode, 2026-06-14):
@@ -308,13 +332,16 @@ guessed.
 
 ## Status
 
-Proves ten invariants — **spend-limit**, **destination-allowlist**,
+Proves thirteen invariants — **spend-limit**, **destination-allowlist**,
 **guard-termination** (no `GUARD_VIOLATION`), **state-monotonicity** (persisted
 values never move backwards), **no-double-spend** (bounded emit count),
 **balance-conservation** (emits ≤ received), **IOU/issued-amount limit** (XFL),
 **authorization** (only the owner can trigger — OWASP SC01), **input-validation**
-(no accept on an absent required param — SC05), and **overflow-safe limit** (a uint64
-wrap can't bypass the limit check — SC07/09; scoped to the limit, not all arithmetic) — on
+(no accept on an absent required param — SC05), **overflow-safe limit** (a uint64
+wrap can't bypass the limit check — SC07/09; scoped to the limit, not all arithmetic),
+**reserve safety** (accept never drives the account below base + owner_count×increment — `-38`),
+**foreign-state authorization** (no accept after an un-granted `state_foreign_set` — SC01 / `-34`),
+and **time/nonce dependence** (no accept hinges on the grindable `ledger_nonce` — SC03/09) — on
 real compiled WASM including the
 **`agent_guardrail`** spend-limit guardrail. Multi-function hooks supported via
 local-call inlining. Not a mock. Every proof is falsifiable; buggy variants yield
@@ -324,8 +351,9 @@ executed; multi-function via inlining) is enforced by failing closed to INCONCLU
 
 Roadmap:
 - ~~invariant DSL~~ ✅ done — see below
-- **richer state model** — reserve safety (`-38`), foreign-state authorization (`-34`),
-  emission-burden via `cbak` — unlocks invariants #5–7 in `docs/INVARIANT-CANDIDATES.md`
+- ~~richer state model — reserve safety (`-38`), foreign-state authorization (`-34`),
+  time/nonce dependence~~ ✅ done (invariants #5/#6/#8 in `docs/INVARIANT-CANDIDATES.md`)
+- **emission-burden via `cbak` re-entry** (#7) — needs cbak + generation modeling
 - **`call_indirect` to host imports / unresolvable tables** — currently fail closed; model
   if a real hook needs them
 

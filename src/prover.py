@@ -56,7 +56,7 @@ class Terminal(Exception):
 
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
-                 "emit_count", "emits", "emits_iou")
+                 "emit_count", "emits", "emits_iou", "fees", "fsets")
 
     def __init__(self):
         self.stack: list = []
@@ -69,6 +69,8 @@ class Path:
         self.emit_count: int = 0  # number of emit() calls on this path
         self.emits: list = []     # emitted native drops (BitVec64) or None if unparseable
         self.emits_iou: list = [] # emitted IOU value as (xfl_bv, cur, iss) or None per emit
+        self.fees: list = []      # per-emit base fee (BitVec64) charged to the emitting acct
+        self.fsets: list = []     # foreign-state-set events: (acct_bytes|None, granted:Bool, ret)
 
     def clone(self) -> "Path":
         p = Path()
@@ -82,6 +84,8 @@ class Path:
         p.emit_count = self.emit_count
         p.emits = list(self.emits)
         p.emits_iou = list(self.emits_iou)
+        p.fees = list(self.fees)
+        p.fsets = list(self.fsets)
         return p
 
 
@@ -131,6 +135,36 @@ class Engine:
         # result. A driver MUST return INCONCLUSIVE (never PROVEN) if a value tainted
         # by one of these can reach the invariant. Surfaced like self.unsupported.
         self.float_overapprox = set()
+        # ---- #8 time/nonce dependence ----
+        # ledger_nonce / ledger_last_time are SYMBOLIC (an attacker can influence which
+        # ledger their tx lands in, and the nonce is host-grindable predictable bytes —
+        # NOT secure randomness). Every BitVec symbol produced by a ledger_nonce read is
+        # registered here; the time-nonce driver checks whether any ACCEPT path's decision
+        # depends on one of these (a security decision gated on a grindable value = exploit).
+        # ledger_seq is ALSO symbolic now (was a concrete 1000, which silently made every
+        # seq-gated branch decidable one way — a latent vacuous/false result).
+        self.nonce_syms: list = []   # z3 BitVec(8) symbols returned by ledger_nonce
+        self.time_syms: list = []    # z3 BitVec symbols for ledger_last_time / ledger_seq
+        self.ledger_seq_sym = None   # the symbolic ledger_seq (shared per run)
+        self.ledger_time_sym = None  # the symbolic ledger_last_time (shared per run)
+        # ---- #6 foreign-state authorization ----
+        # Each state_foreign_set call records (cons, target_account_bytes, authorized:Bool).
+        # `authorized` is True only if a HookGrant covering that account is MODELED on the
+        # path. With NO grant model wired (the default), every foreign-set is UNauthorized
+        # -> a counterexample. If foreign-state modeling is incomplete for a path we set
+        # foreign_unsound so the driver fails closed (INCONCLUSIVE), never PROVEN.
+        self.foreign_sets_on_accept: list = []  # (cons, [(acct,granted,ret)...]) per accept path
+        self.foreign_unsound = set()     # tags for foreign-state ops we couldn't model soundly
+        # ---- #5 reserve safety ----
+        # Symbolic standing account balance + reserve params (base + owner_count*inc), all
+        # bitvecs. Populated lazily the first time a reserve-aware host fn is read so an
+        # ordinary hook is untouched. Used by prove_reserve to check no accept leaves
+        # balance - (emitted + fees) below the reserve.
+        self.acct_balance = None     # BitVec64 standing XAH balance (drops)
+        self.reserve_base = None     # BitVec64 reserve base (drops)
+        self.reserve_inc = None      # BitVec64 reserve increment (drops)
+        self.owner_count = None      # BitVec64 owner count
+        self.fees_on_accept: list = []   # (cons, total_fee_bv) per accepting path (emit fees)
         self._undef = 0              # counter for fresh uninitialized-memory bytes
         self._float_fresh = 0        # counter for fresh over-approx float results
         self._extra_forks = []       # error-sentinel sibling paths from the current host_call
@@ -361,9 +395,89 @@ class Engine:
             vbytes = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian value
             p.writes[kn] = z3.Concat(*vbytes) if n > 1 else vbytes[0]
             st.append(z3.BitVecVal(n, 64)); return
+        # ---- foreign-state host fns (#6 foreign-state authorization) ----
+        if name == "state_foreign":
+            # state_foreign(write_ptr,wlen, kread_ptr,klen, nread_ptr,nlen, aread_ptr,alen)
+            # Read another account's state. Args (8): pop in reverse. We model the read as
+            # SYMBOLIC content with a SYMBOLIC return (could be absent < 0). The account is
+            # (aread_ptr, alen).
+            # args pushed L->R; stack top is the LAST arg (aread_len). Pop in reverse order.
+            alen = conc(st.pop()); aptr = conc(st.pop())
+            nlen = conc(st.pop()); nptr = conc(st.pop())
+            klen = conc(st.pop()); kptr = conc(st.pop())
+            wlen = conc(st.pop()); wptr = conc(st.pop())
+            n = max(1, min(wlen, 256))
+            idx = len(self.foreign_sets_on_accept) + len(p.fsets)
+            bs = self.fresh_bytes(f"foreign_state:{idx}", n)
+            self.store_bytes(p, wptr, bs[:n])
+            st.append(z3.BitVec(f"state_foreign_ret:{idx}", 64)); return
+        if name == "state_foreign_set":
+            # state_foreign_set(read_ptr,rlen, kread_ptr,klen, nread_ptr,nlen, aread_ptr,alen)
+            # Write another account's state. The HOST returns NOT_AUTHORIZED (-34) when the
+            # target account A has NOT published a matching HookGrant authorizing this hook;
+            # a non-negative return means a grant exists and the write succeeded.
+            #
+            # SOUND FORMALIZATION of "#6 foreign-state authorization": rather than (unsoundly)
+            # guessing which grants exist on-ledger, we model the host return as a SYMBOLIC
+            # 64-bit value that MAY be the unauthorized sentinel. A hook is authorized for
+            # this write iff it DID NOT proceed-to-accept on the -34 branch — i.e. a correct
+            # hook checks the return and rolls back when it's negative (XAHC_TRY / a `< 0`
+            # guard). We record (path-cons, target-account-bytes, granted-flag) where
+            # `granted := (ret >= 0)`. The driver then asserts: every accept path proves the
+            # foreign-set was granted. Fails CLOSED: if we cannot identify the target account
+            # (non-concrete alen) we tag foreign_unsound -> INCONCLUSIVE, never PROVEN.
+            # args pushed L->R; stack top is the LAST arg (aread_len). Pop in reverse order.
+            alen = conc(st.pop()); aptr = conc(st.pop())
+            nlen = conc(st.pop()); nptr = conc(st.pop())
+            klen = conc(st.pop()); kptr = conc(st.pop())
+            rlen = conc(st.pop()); rptr = conc(st.pop())
+            idx = len(p.fsets)
+            ret = z3.BitVec(f"state_foreign_set_ret:{idx}", 64)
+            self.inputs[f"state_foreign_set_ret:{idx}"] = ret
+            if alen == 20:
+                acct = [self.load_byte(p, aptr + i) for i in range(20)]
+            else:
+                # can't soundly pin the target account -> fail closed for this op
+                acct = None
+                self.foreign_unsound.add("state_foreign_set:account_len")
+            # `granted` := the host returned success (>= 0), which on Xahau happens iff a
+            # matching HookGrant authorized the write (else NOT_AUTHORIZED -34). Recorded on
+            # the path so the accept handler can snapshot every foreign-set on this trace.
+            granted = (ret >= z3.BitVecVal(0, 64))   # signed BV >= (z3 default)
+            p.fsets.append((acct, granted, ret))
+            st.append(ret); return
         # ---- emitted-transaction host fns (for balance / double-spend invariants) ----
         if name == "ledger_seq":
-            st.append(z3.BitVecVal(1000, 64)); return
+            # SYMBOLIC (was a concrete 1000). A submitter can choose / wait for the ledger
+            # their tx is included in, so seq is attacker-influenceable within a range. A
+            # legitimate escrow-style deadline (`seq >= DEADLINE`) is fine; the time/nonce
+            # driver only flags NONCE dependence, never plain seq. Shared per run.
+            if self.ledger_seq_sym is None:
+                self.ledger_seq_sym = z3.BitVec("ledger_seq", 64)
+                self.time_syms.append(self.ledger_seq_sym)
+                self.inputs["ledger_seq"] = self.ledger_seq_sym
+            st.append(self.ledger_seq_sym); return
+        if name == "ledger_last_time":
+            # SYMBOLIC close time (seconds). Attacker can nudge which ledger they land in.
+            if self.ledger_time_sym is None:
+                self.ledger_time_sym = z3.BitVec("ledger_last_time", 64)
+                self.time_syms.append(self.ledger_time_sym)
+                self.inputs["ledger_last_time"] = self.ledger_time_sym
+            st.append(self.ledger_time_sym); return
+        if name == "ledger_nonce":
+            # ledger_nonce(write_ptr, write_len) -> 32 bytes of "randomness" + length.
+            # CRITICAL SOUNDNESS NOTE: the nonce is NOT secure randomness — it is derived
+            # from ledger/seed material that a determined submitter can predict or grind.
+            # We model it as FRESH SYMBOLIC bytes AND register every byte symbol so the
+            # time/nonce driver can detect any accept decision that hinges on it. Each call
+            # gets distinct bytes (a hook reading the nonce twice gets two reads).
+            wlen = conc(st.pop()); wptr = conc(st.pop())
+            n = min(wlen, 32)
+            bs = [z3.BitVec(f"ledger_nonce_{len(self.nonce_syms)+i}", 8) for i in range(n)]
+            self.nonce_syms.extend(bs)
+            self.store_bytes(p, wptr, bs)
+            self.inputs.setdefault("ledger_nonce", []).extend(bs)
+            st.append(z3.BitVecVal(n, 64)); return
         if name == "etxn_reserve":
             n = st.pop(); st.append(z3.BitVecVal(1, 64)); return     # success
         if name == "etxn_details":
@@ -379,6 +493,13 @@ class Engine:
             p.emit_count += 1
             p.emits.append(self._emit_drops(p, rptr))
             p.emits_iou.append(self._emit_iou_xfl(p, rptr))
+            # The emitting account also pays the emitted txn's base fee. We model it as the
+            # SAME concrete value `etxn_fee_base` returns (10 drops) — that is exactly the fee
+            # the host charges and the hook itself reads/pays, so reserve outflow is neither
+            # over- nor under-counted: it matches the modeled host behaviour the hook sees.
+            # (If the fee model here and in etxn_fee_base ever diverge, fix BOTH together — an
+            # under-count would be a false PROVEN for reserve safety.)
+            p.fees.append(z3.BitVecVal(10, 64))
             st.append(z3.BitVecVal(32, 64)); return                 # >=0 = emitted hash len
         # ================= XFL (issued-amount) float host fns =================
         # DISCIPLINE (money-hooks): EXACT bit-ops where possible; FOLD-TO-LITERAL via
@@ -568,6 +689,8 @@ class Engine:
                 self.accepts_full.append((code, list(p.cons), dict(p.writes)))
                 self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
                 self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
+                self.fees_on_accept.append((list(p.cons), list(p.fees), p.emit_count))
+                self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
