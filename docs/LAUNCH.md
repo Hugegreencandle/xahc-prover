@@ -139,7 +139,7 @@ Capture tool: `asciinema` for crisp terminal, or screen-record + the explorer ta
 
 ## D) Headline facts (all verifiable in-repo)
 - First Hook verifier (a search for one returns only EVM tools).
-- 14 invariants, each with a falsifiable buggy twin; 86 regression tests.
+- 14 invariants, each with a falsifiable buggy twin; 97 regression tests.
 - 3-lens self-audit + a follow-up audit; **7 false-PROVEN vectors found + fixed**; fails closed.
 - Honest scope discipline in action: the emission-burden invariant proves only the STATIC
   reserve-count bound (accept ⟹ emit_count ≤ etxn_reserve(n), `-13`); it returns INCONCLUSIVE —
