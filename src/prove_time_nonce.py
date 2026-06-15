@@ -24,18 +24,22 @@ in `e.nonce_syms`. The dependence test substitutes those symbols with a primed c
 NON-nonce symbols shared) and asks Z3 whether the path constraint can hold under the original
 nonce yet fail under the primed nonce — a sound, exact dependence query (no heuristics).
 
-KNOWN ENGINE LIMITATION — nonce-through-state laundering (fail-closed here):
-  The shared engine's `state` host fn returns a FRESH `state_old:<key>` symbol and does NOT
-  connect a same-invocation `state_set` write (which lands in `p.writes`) to a later `state`
-  read of the same key. That modeling is sound-by-design for prove_monotonic's worst case, so
-  we do NOT change it. But it means a hook can LAUNDER the nonce out of the dependence query:
+NONCE-THROUGH-STATE LAUNDERING — now CAUGHT precisely (improved 2026-06-15):
+  The engine models SAME-INVOCATION state read-after-write: a `state` read of a key written
+  earlier this invocation returns the STAGED value, not a fresh `state_old:<key>`. So the
+  classic laundering attack
       read ledger_nonce -> state_set(KEY, nonce) -> state(KEY) read-back -> gate accept on it
-  Here the accept constraint references `state_old:KEY` (fresh, nonce-free), NOT any nonce
-  symbol, so the substitution query sees no nonce -> UNSAT -> a FALSE PROVEN. To stay sound,
-  this driver detects the laundering precondition directly: on ANY accepting path, if a value
-  that depends on a nonce symbol flows into a `state_set` write (recorded in `e.accepts_full`'s
-  per-path writes dict), the nonce-dependence query is INCOMPLETE for that path and we return
-  INCONCLUSIVE(3) — NEVER PROVEN. (Over-conservative is acceptable; a missed laundering is not.)
+  now flows the nonce INTO the accept constraint, and the exact substitution query below
+  catches it as a real COUNTEREXAMPLE(2) — no longer a fail-closed INCONCLUSIVE.
+
+  BELT-AND-SUSPENDERS (still fail-closed): the engine cannot model EVERY laundering route —
+  e.g. a nonce written to FOREIGN state (state_foreign_set, never read back into the accept
+  constraint here), or a width-mismatched / partial read whose staged bytes don't reconstruct
+  the same symbol the query renames. So if the substitution query did NOT already return a
+  counterexample, we STILL check the laundering precondition: any accepting path that writes a
+  nonce-derived value into state (local OR foreign) makes the dependence query potentially
+  incomplete for that path -> INCONCLUSIVE(3), NEVER PROVEN. Over-conservative is acceptable;
+  a missed laundering is not.
 
 Soundness / fail-closed: solver `unknown` (on the dependence query OR a feasibility check)
 => INCONCLUSIVE; unsupported opcode / hit unroll bound => INCONCLUSIVE; a nonce-derived value
@@ -88,29 +92,16 @@ def main(path: str) -> int:
     if nonce_syms:
         nonce_names = {str(b) for b in nonce_syms}
 
-        # FAIL-CLOSED: nonce-through-state laundering. The engine does NOT connect a
-        # same-invocation state_set write to a later state read (state() returns a fresh
-        # state_old:<key> symbol), so a hook that writes a nonce-derived value to state and
-        # gates accept on the read-back would have a nonce-FREE accept constraint -> the
-        # substitution query below would miss it and falsely PROVE. We therefore check the
-        # laundering PRECONDITION directly: any accepting path whose state writes include a
-        # value depending on a nonce symbol makes the dependence query INCOMPLETE -> we
-        # cannot claim PROVEN for that path. (e.accepts_full carries per-path writes.)
-        for code, cons, writes in e.accepts_full:
-            for key, val in writes.items():
-                if _depends_on(val, nonce_names):
-                    print("\n⚠️ INCONCLUSIVE — an accepting path writes a ledger_nonce-derived "
-                          f"value into state (key {key!r}). The engine does not model "
-                          "same-invocation state read-after-write, so a nonce laundered through "
-                          "state cannot be tracked by the dependence query; cannot claim PROVEN "
-                          "(fail-closed).")
-                    return 3
-
         # Build a substitution nonce -> fresh primed nonce. Shared (non-nonce) symbols are
         # left untouched, so the two constraint copies agree on EVERYTHING except the nonce.
         primed = [z3.BitVec(f"{b}__prime", b.size()) for b in nonce_syms]
         sub = list(zip(nonce_syms, primed))
 
+        # EXACT DEPENDENCE QUERY FIRST. With same-invocation state read-after-write modeled in
+        # the engine, a nonce laundered through (local) state now appears in the accept
+        # constraint, so this query catches it as a real COUNTEREXAMPLE — no longer a
+        # conservative INCONCLUSIVE. We run it BEFORE the belt-and-suspenders write-check so a
+        # genuinely-caught laundering reports the stronger, precise verdict (2).
         for code, cons in e.accepts:
             C = z3.And(*cons) if cons else z3.BoolVal(True)
             Cp = z3.substitute(C, *sub)
@@ -130,6 +121,21 @@ def main(path: str) -> int:
                       "another — a grindable/predictable nonce decides the outcome (insecure "
                       "randomness). An attacker who predicts/grinds the nonce controls the result.")
                 return 2
+
+        # BELT-AND-SUSPENDERS (fail-closed): the exact query above caught no dependence, but
+        # the engine cannot model EVERY laundering route (e.g. nonce -> FOREIGN state, or a
+        # width-mismatched read whose staged bytes don't reconstruct the exact renamed symbol).
+        # So if an accepting path still writes a nonce-derived value into state, the query may
+        # be incomplete for that path -> refuse PROVEN. (e.accepts_full carries per-path writes.)
+        for code, cons, writes in e.accepts_full:
+            for key, val in writes.items():
+                if _depends_on(val, nonce_names):
+                    print("\n⚠️ INCONCLUSIVE — an accepting path writes a ledger_nonce-derived "
+                          f"value into state (key {key!r}) but the exact dependence query did "
+                          "not flag it (a laundering route the engine cannot fully model — e.g. "
+                          "foreign state or a width-mismatched read-back); cannot claim PROVEN "
+                          "(fail-closed).")
+                    return 3
 
     if e.unsupported:
         print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")

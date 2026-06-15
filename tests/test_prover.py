@@ -543,35 +543,37 @@ def test_time_nonce_adversarial_arithmetic_is_counterexample():
     assert prove_time_nonce.main(os.path.join(H, "adv_nonce_arith.wasm")) == 2
 
 
-def test_time_nonce_state_laundering_is_inconclusive_not_false_proven():
-    # FIXED 2026-06-15 (was: KNOWN_UNSOUND_GAP that returned a FALSE PROVEN ==0).
+def test_time_nonce_state_laundering_is_counterexample():
+    # UPGRADED 2026-06-15. History: was a FALSE PROVEN (==0); then fail-closed INCONCLUSIVE
+    # (==3) via a driver-side write-check; NOW a precise COUNTEREXAMPLE (==2) because the
+    # engine models SAME-INVOCATION state read-after-write.
     #
-    # adv_nonce_state.c reads ledger_nonce, writes it to its OWN state via state_set,
-    # reads it back via state(), and gates accept on the read-back value. In real Xahau
-    # semantics a state read in the SAME hook invocation sees the value just staged, so
-    # the accept GENUINELY depends on the (grindable) nonce.
-    #
-    # The shared engine models state() as returning a FRESH symbolic prior value
-    # (`state_old:<key>`), DECOUPLED from any state_set staged in the same run (sound by
-    # design for prove_monotonic — NOT changed). So the accept constraint references
-    # `state_old:KEY`, not a nonce symbol, and the substitution query alone cannot see the
-    # laundered dependence. prove_time_nonce now closes this by detecting the laundering
-    # PRECONDITION: an accepting path that writes a nonce-derived value into state makes the
-    # dependence query incomplete -> INCONCLUSIVE(3), never PROVEN. Over-conservative is OK.
+    # adv_nonce_state.c reads ledger_nonce, writes it to its OWN state via state_set, reads it
+    # back via state(), and gates accept on the read-back value. In real Xahau semantics a
+    # state read in the SAME hook invocation sees the value just staged, so the accept
+    # GENUINELY depends on the (grindable) nonce. With read-after-write modeled, the state()
+    # read-back returns the staged nonce bytes, so the nonce flows INTO the accept constraint
+    # and the exact substitution query catches it as a real counterexample.
     rc = prove_time_nonce.main(os.path.join(H, "adv_nonce_state.wasm"))
-    assert rc == 3, (
-        "adv_nonce_state returns %d — MUST be 3 (INCONCLUSIVE/fail-closed). A 0 here is a "
-        "FALSE PROVEN (catastrophic): the nonce was laundered through state and missed." % rc)
+    assert rc == 2, (
+        "adv_nonce_state returns %d — MUST be 2 (COUNTEREXAMPLE): read-after-write flows the "
+        "laundered nonce into the accept constraint and the dependence query catches it." % rc)
     assert rc != 0, "nonce-laundering hook must NEVER reach PROVEN"
-    # Pin the engine limitation this guards against: the accept constraint reads through a
-    # fresh state_old symbol (the engine does NOT connect state_set->state), so the nonce
-    # does NOT appear directly in the accept constraints — the driver-side write check is
-    # what catches it, not the substitution query.
+    # Pin the mechanism: with read-after-write the accept constraint DIRECTLY references nonce
+    # symbols (the state() read-back returns the staged nonce bytes), so the substitution query
+    # — not the belt-and-suspenders write check — is what catches it.
     e = Engine(open(os.path.join(H, "adv_nonce_state.wasm"), "rb").read()); e.run()
     assert e.nonce_syms, "nonce should be read"
     nonce_names = {str(b) for b in e.nonce_syms}
-    # The accepting path's WRITES must carry a nonce-derived value (the laundering signal the
-    # driver keys on); accepts_full = (code, cons, writes).
+    accept_dep = False
+    for _code, cons in e.accepts:
+        C = z3.And(*cons) if cons else z3.BoolVal(True)
+        if prove_time_nonce._depends_on(C, nonce_names):
+            accept_dep = True
+    assert accept_dep, (
+        "accept constraint does NOT reference a nonce symbol — read-after-write not wired")
+    # The staged write still carries the nonce (the belt-and-suspenders signal remains valid as
+    # a fallback for routes the engine can't model).
     laundered = False
     for _code, _cons, writes in e.accepts_full:
         for _k, v in writes.items():
@@ -579,6 +581,148 @@ def test_time_nonce_state_laundering_is_inconclusive_not_false_proven():
                 laundered = True
     assert laundered, (
         "no accepting path writes a nonce-derived value to state — fixture/detection mismatch")
+
+
+# --- SAME-INVOCATION STATE READ-AFTER-WRITE (engine semantics) -----------------
+def _raw_state_set(e, p, key: bytes, val_bytes, rptr=2048, kptr=4096):
+    """Drive the engine's state_set host fn: stage `val_bytes` (list[int|BitVec8]) at
+    key `key`. Mirrors the C `state_set(read_ptr, read_len, kread_ptr, kread_len)`."""
+    for i, b in enumerate(val_bytes):
+        p.mem[rptr + i] = b if z3.is_bv(b) else z3.BitVecVal(b & 0xFF, 8)
+    for i, kb in enumerate(key):
+        p.mem[kptr + i] = z3.BitVecVal(kb, 8)
+    # pop order in host_call: klen, kptr, rlen, rptr -> push reverse
+    p.stack += [z3.BitVecVal(rptr, 64), z3.BitVecVal(len(val_bytes), 64),
+                z3.BitVecVal(kptr, 64), z3.BitVecVal(len(key), 64)]
+    e.host_call("state_set", p)
+    p.stack.pop()  # discard return length
+
+
+def _raw_state(e, p, key: bytes, n: int, wptr=8192, kptr=4096):
+    """Drive the engine's state host fn: read `n` bytes of key `key` into wptr.
+    Returns the list of BitVec8 read back (wptr..wptr+n-1)."""
+    for i, kb in enumerate(key):
+        p.mem[kptr + i] = z3.BitVecVal(kb, 8)
+    p.stack += [z3.BitVecVal(wptr, 64), z3.BitVecVal(n, 64),
+                z3.BitVecVal(kptr, 64), z3.BitVecVal(len(key), 64)]
+    e.host_call("state", p)
+    rlen = prover.conc(p.stack.pop())
+    assert rlen == n
+    return [p.mem[wptr + i] for i in range(n)]
+
+
+def test_state_read_after_write_byte_exact():
+    # FAITHFUL: a state read of a key written THIS invocation returns the staged value,
+    # byte-for-byte (xahaud same-invocation read-after-write).
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    p.globals[0] = z3.BitVecVal(0x10000, 32)
+    val = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    _raw_state_set(e, p, b"NCE", val, rptr=2048)
+    got = _raw_state(e, p, b"NCE", 8, wptr=8192)
+    for i, b in enumerate(got):
+        assert prover.conc(b) == val[i], f"byte {i}: read {prover.conc(b)} != written {val[i]}"
+    # and NO fresh state_old symbol was created for a fully-staged read
+    assert "NCE" not in e.state_old, "read-after-write must not fabricate a state_old prior"
+
+
+def test_state_read_without_prior_write_is_symbolic_prior():
+    # UNCHANGED worst-case: a read with no same-invocation write returns a FRESH symbolic
+    # state_old:<key> (the adversarial prior monotonic relies on).
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    p.globals[0] = z3.BitVecVal(0x10000, 32)
+    got = _raw_state(e, p, b"NCE", 8, wptr=8192)
+    assert "NCE" in e.state_old, "no-write read must create a symbolic prior"
+    names = {str(z3.simplify(b)) for b in got}
+    assert any(n.startswith("state_old:NCE") for n in names), "prior not symbolic state_old"
+
+
+def test_state_read_after_write_symbolic_value_preserved():
+    # A staged SYMBOLIC value must read back as the SAME symbol (not a fresh prior), so a
+    # later branch on the read-back is genuinely tied to the written value.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    p.globals[0] = z3.BitVecVal(0x10000, 32)
+    syms = [z3.BitVec(f"v_{i}", 8) for i in range(8)]
+    _raw_state_set(e, p, b"NCE", syms, rptr=2048)
+    got = _raw_state(e, p, b"NCE", 8, wptr=8192)
+    for i in range(8):
+        s = z3.Solver(); s.add(got[i] != syms[i])
+        assert s.check() == z3.unsat, f"byte {i} read-back not equal to staged symbol"
+
+
+def test_state_partial_read_after_write_edge():
+    # WIDTH/PARTIAL edge: stage 8 bytes, read only the first 4 -> exactly the first 4 staged
+    # bytes (big-endian, byte0 = MSB), no fresh prior.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    p.globals[0] = z3.BitVecVal(0x10000, 32)
+    val = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]
+    _raw_state_set(e, p, b"NCE", val, rptr=2048)
+    got = _raw_state(e, p, b"NCE", 4, wptr=8192)
+    assert [prover.conc(b) for b in got] == val[:4], "partial read not byte-exact prefix"
+    assert "NCE" not in e.state_old, "partial-within-staged read must not need a prior"
+
+
+def test_state_overlong_read_after_write_backfills_symbolic_prior():
+    # Stage 4 bytes, read 8: first 4 = staged, tail 4 = FRESH symbolic prior (fail-closed,
+    # never silently zero/garbage). This is the width-mismatch worst case.
+    e = Engine(open(os.path.join(H, "limit.wasm"), "rb").read())
+    p = Path()
+    p.globals[0] = z3.BitVecVal(0x10000, 32)
+    val = [0xAA, 0xBB, 0xCC, 0xDD]
+    _raw_state_set(e, p, b"NCE", val, rptr=2048)
+    got = _raw_state(e, p, b"NCE", 8, wptr=8192)
+    assert [prover.conc(b) for b in got[:4]] == val, "staged prefix lost"
+    assert "NCE" in e.state_old, "overlong read must back-fill a symbolic prior tail"
+    tail = {str(z3.simplify(b)) for b in got[4:]}
+    assert all(t.startswith("state_old:NCE") for t in tail), "tail not symbolic prior"
+
+
+def _adv_monotonic_raw_module():
+    """ADVERSARIAL monotonic hook (hand WASM): write the incoming NONCE FIRST, then
+    state()-read it back, then accept. There is NO prior-vs-written comparison — the
+    read-back is the value it just wrote, not the true prior. Under read-after-write the
+    read returns the staged write, so a naive driver might think 'written == read' is safe.
+    prove_monotonic must STILL catch this: the final write is compared against state_old
+    (the genuine prior), which is never read here -> write-without-(prior-)read -> CEX(2)."""
+    types = [_ftype([I32], [I64]),                       # 0 hook
+             _ftype([I32, I32, I32, I32], [I64]),        # 1 state_set
+             _ftype([I32, I32, I32, I32], [I64]),        # 2 state
+             _ftype([I32, I32, I32], [I64])]             # 3 accept
+
+    def _imp(mod, nm, t):
+        return _uleb(len(mod)) + mod.encode() + _uleb(len(nm)) + nm.encode() + bytes([0x00]) + _uleb(t)
+    imports = [_imp("env", "state_set", 1), _imp("env", "state", 2), _imp("env", "accept", 3)]
+    KEY_PTR, VAL_PTR, RD_PTR, MSG_PTR = 1024, 1029, 1037, 1045
+    data = b"NONCE" + bytes([9, 9, 9, 9, 9, 9, 9, 9]) + bytes([0, 0, 0, 0, 0, 0, 0, 0]) + b"ok\x00"
+    body = b""
+    # state_set(VAL_PTR, 8, KEY_PTR, 5)   -- write FIRST (adversarial: before any prior read)
+    body += _i32c(VAL_PTR) + _i32c(8) + _i32c(KEY_PTR) + _i32c(5) + bytes([0x10]) + _uleb(0) + bytes([0x1A])
+    # state(RD_PTR, 8, KEY_PTR, 5)        -- read it back (read-after-write returns staged val)
+    body += _i32c(RD_PTR) + _i32c(8) + _i32c(KEY_PTR) + _i32c(5) + bytes([0x10]) + _uleb(1) + bytes([0x1A])
+    # accept(MSG_PTR, 2, 0)
+    body += _i32c(MSG_PTR) + _i32c(2) + _i64c(0) + bytes([0x10]) + _uleb(2) + bytes([0x1A])
+    body += _i64c(0) + bytes([0x0B])
+    return _module(types, imports, export_fn_idx=3, data_off=1024, data_bytes=data, body=body)
+
+
+def test_monotonic_read_after_write_violation_still_caught():
+    # SOUNDNESS GUARD for the read-after-write change: a hook that writes then reads-back its
+    # OWN write (no comparison to the genuine prior) must NEVER be PROVEN. The driver compares
+    # the final write to state_old (the true prior, never read here) -> write-without-prior-read
+    # -> COUNTEREXAMPLE(2) or at minimum INCONCLUSIVE(3). A 0 here would be the catastrophic
+    # false PROVEN that read-after-write could have introduced.
+    wasm = _adv_monotonic_raw_module()
+    path = os.path.join(ROOT, "tests", "_tmp_adv_mono_raw.wasm")
+    open(path, "wb").write(wasm)
+    try:
+        rc = prove_monotonic.main(path)
+    finally:
+        os.remove(path)
+    assert rc != 0, "adversarial read-after-write monotonic hook was falsely PROVEN!"
+    assert rc in (2, 3), f"expected CEX(2) or INCONCLUSIVE(3), got {rc}"
 
 
 def test_decoder_tracks_types():
@@ -1657,6 +1801,9 @@ def test_dsl_float_overapprox_taints_to_inconclusive():
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    # also run the read-after-write adversarial suite (separate module, one runner)
+    import test_raw
+    fns += [v for k, v in sorted(vars(test_raw).items()) if k.startswith("test_")]
     for fn in fns:
         fn()
         print(f"ok  {fn.__name__}")

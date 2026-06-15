@@ -56,6 +56,7 @@ class Terminal(Exception):
 
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
+                 "writes_bytes",
                  "emit_count", "emits", "emits_iou", "fees", "fsets",
                  "reserve_n", "reserve_calls")
 
@@ -67,6 +68,11 @@ class Path:
         self.cons: list = []    # path constraints (z3 Bool)
         self.guards: dict = {}  # guard id -> crossings so far on this path
         self.writes: dict = {}  # state key (str) -> last value written (BitVec) on this path
+        # Same writes, kept as the EXACT big-endian byte list (BitVec(8) per byte) staged on
+        # this path. `state` read-after-write returns these bytes byte-for-byte so a partial
+        # / width-mismatched read of a staged value is faithful (writes[] is only the whole-
+        # value Concat that monotonic / time_nonce consume). Mirrors `writes` 1:1.
+        self.writes_bytes: dict = {}  # state key (str) -> list[BitVec(8)] big-endian (byte0=MSB)
         self.emit_count: int = 0  # number of emit() calls on this path
         self.emits: list = []     # emitted native drops (BitVec64) or None if unparseable
         self.emits_iou: list = [] # emitted IOU value as (xfl_bv, cur, iss) or None per emit
@@ -91,6 +97,7 @@ class Path:
         p.cons = list(self.cons)
         p.guards = dict(self.guards)
         p.writes = dict(self.writes)
+        p.writes_bytes = {k: list(v) for k, v in self.writes_bytes.items()}
         p.emit_count = self.emit_count
         p.emits = list(self.emits)
         p.emits_iou = list(self.emits_iou)
@@ -401,8 +408,34 @@ class Engine:
             klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
             kn = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen)).decode("latin1")
             n = max(1, min(wlen, 256))
-            # SOUND worst case for monotonicity: assume the slot EXISTS with a
-            # symbolic prior value (you can only "decrease" something already there).
+            # SAME-INVOCATION READ-AFTER-WRITE (faithful to xahaud): a `state` read sees the
+            # value just STAGED by an earlier `state_set` in THIS invocation. If this key was
+            # written on this path, return the staged bytes (byte-exact); otherwise fall back
+            # to the SOUND worst case — a FRESH symbolic prior value (the slot pre-exists with
+            # an unknown value; you can only "decrease" something already there).
+            #
+            # SOUNDNESS for prove_monotonic (the shared consumer): monotonic compares the
+            # FINAL staged write against `state_old:<key>` — the PRIOR value. A correct
+            # replay-guard reads the prior FIRST (writes==empty -> gets state_old), checks, then
+            # writes; that read-before-write path is UNCHANGED, so state_old is still populated
+            # and the prior-vs-written comparison is intact. A read-AFTER-write returns the
+            # staged value, which is only ever a value the hook itself chose to persist — it can
+            # never fabricate a smaller `state_old` (the prior), so it cannot make a backwards
+            # write look forward. (See test_monotonic_read_after_write_violation_still_caught.)
+            staged = p.writes_bytes.get(kn)
+            if staged is not None:
+                bs = list(staged)
+                if len(bs) < n:
+                    # read wants MORE bytes than were staged: xahaud returns only the slot's
+                    # actual length, but to stay byte-faithful AND fail-closed we back-fill the
+                    # unstaged tail with a fresh symbolic prior (worst case for those bytes).
+                    old = self.state_old.get(kn)
+                    if old is None or len(old) < n:
+                        old = [z3.BitVec(f"state_old:{kn}_{i}", 8) for i in range(n)]
+                        self.state_old[kn] = old
+                    bs = bs + old[len(bs):n]
+                self.store_bytes(p, wptr, bs[:n])
+                st.append(z3.BitVecVal(n, 64)); return
             old = self.state_old.get(kn)
             if old is None or len(old) < n:
                 old = [z3.BitVec(f"state_old:{kn}_{i}", 8) for i in range(n)]
@@ -416,6 +449,7 @@ class Engine:
             n = max(1, min(rlen, 256))
             vbytes = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian value
             p.writes[kn] = z3.Concat(*vbytes) if n > 1 else vbytes[0]
+            p.writes_bytes[kn] = list(vbytes)   # byte-exact, for same-invocation read-after-write
             st.append(z3.BitVecVal(n, 64)); return
         # ---- foreign-state host fns (#6 foreign-state authorization) ----
         if name == "state_foreign":
