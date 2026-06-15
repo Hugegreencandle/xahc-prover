@@ -194,6 +194,16 @@ class Engine:
         self.reserve_inc = None      # BitVec64 reserve increment (drops)
         self.owner_count = None      # BitVec64 owner count
         self.fees_on_accept: list = []   # (cons, total_fee_bv) per accepting path (emit fees)
+        # SOUNDNESS (reserve): the per-emit base fee charged to the emitting account is the
+        # network-dependent `etxn_fee_base` value, which ESCALATES under load and is only
+        # bounded BELOW by the host base fee (10 drops). Pinning it at concrete 10 would
+        # UNDER-COUNT outflow under fee escalation -> a false PROVEN for reserve safety. We
+        # model it as ONE shared symbolic value `>= 10` (the host floor), returned by BOTH
+        # `etxn_fee_base` (what the hook reads) and charged in `emit` (what the host deducts),
+        # so the proof must hold for EVERY fee >= base. Lazily created the first time a fee is
+        # needed (see _base_fee) so a non-emitting hook is untouched.
+        self.emit_base_fee = None    # BitVec64 symbolic per-emit base fee (>= 10), shared per run
+        self.HOST_BASE_FEE = 10      # host base-fee floor in drops (etxn_fee_base lower bound)
         self._undef = 0              # counter for fresh uninitialized-memory bytes
         self._float_fresh = 0        # counter for fresh over-approx float results
         self._extra_forks = []       # error-sentinel sibling paths from the current host_call
@@ -235,6 +245,25 @@ class Engine:
     def store(self, p: Path, addr: int, n: int, val):
         for k in range(n):
             p.mem[addr + k] = z3.Extract(8 * k + 7, 8 * k, val)
+
+    def _base_fee(self, p: Path):
+        """The symbolic per-emit base fee (>= host floor), shared across the run.
+
+        SOUNDNESS: a single shared BitVec64 returned by `etxn_fee_base` and charged by `emit`,
+        constrained `UGE(fee, HOST_BASE_FEE)`. The floor constraint is appended to the path's
+        constraints the first time the fee is used on that path, so it flows into
+        `fees_on_accept`/`cons` and every consumer (e.g. prove_reserve) sees `fee in [10, INF)`.
+        Modeling the fee as `>= base` (not concrete 10) means outflow is never UNDER-counted
+        under fee escalation, closing the reserve-safety false-PROVEN.
+        """
+        if self.emit_base_fee is None:
+            self.emit_base_fee = z3.BitVec("emit_base_fee", 64)
+        fee = self.emit_base_fee
+        floor = z3.UGE(fee, z3.BitVecVal(self.HOST_BASE_FEE, 64))
+        # Add the floor to THIS path once (avoid duplicate identical constraints).
+        if not any(c is floor or z3.eq(c, floor) for c in p.cons):
+            p.cons.append(floor)
+        return fee
 
     # ---- XFL (issued-amount float) modeling helpers ----
     @staticmethod
@@ -560,19 +589,22 @@ class Engine:
                 p.mem[wptr + i] = z3.BitVecVal(0, 8)
             st.append(z3.BitVecVal(n, 64)); return
         if name == "etxn_fee_base":
-            st.pop(); st.pop(); st.append(z3.BitVecVal(10, 64)); return  # small positive fee
+            # Return the SYMBOLIC per-emit base fee (>= host floor). xahaud computes this from
+            # the network base fee, which ESCALATES under load — modeling it concrete (10) would
+            # let a fee-escalation breach slip past as a false PROVEN for reserve safety.
+            st.pop(); st.pop(); st.append(self._base_fee(p)); return
         if name == "emit":
             rlen = conc(st.pop()); rptr = conc(st.pop()); st.pop(); st.pop()
             p.emit_count += 1
             p.emits.append(self._emit_drops(p, rptr))
             p.emits_iou.append(self._emit_iou_xfl(p, rptr))
-            # The emitting account also pays the emitted txn's base fee. We model it as the
-            # SAME concrete value `etxn_fee_base` returns (10 drops) — that is exactly the fee
-            # the host charges and the hook itself reads/pays, so reserve outflow is neither
-            # over- nor under-counted: it matches the modeled host behaviour the hook sees.
-            # (If the fee model here and in etxn_fee_base ever diverge, fix BOTH together — an
-            # under-count would be a false PROVEN for reserve safety.)
-            p.fees.append(z3.BitVecVal(10, 64))
+            # The emitting account also pays the emitted txn's base fee. We charge the SAME
+            # SYMBOLIC value `etxn_fee_base` returns (>= host floor 10) — exactly the fee the
+            # host deducts and the hook reads/pays. Because the fee ranges over [10, INF), the
+            # reserve proof must hold for EVERY fee >= base, so outflow is never UNDER-counted
+            # under fee escalation (an under-count would be a false PROVEN for reserve safety).
+            # `etxn_fee_base` and `emit` share ONE symbol via _base_fee — they cannot diverge.
+            p.fees.append(self._base_fee(p))
             st.append(z3.BitVecVal(32, 64)); return                 # >=0 = emitted hash len
         # ================= XFL (issued-amount) float host fns =================
         # DISCIPLINE (money-hooks): EXACT bit-ops where possible; FOLD-TO-LITERAL via

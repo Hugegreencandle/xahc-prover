@@ -8,6 +8,8 @@
 
 static const uint8_t DST[20] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
 
+extern int64_t etxn_fee_base(uint32_t read_ptr, uint32_t read_len);
+
 int64_t cbak(uint32_t reserved) { return 0; }
 
 static uint64_t be8(const uint8_t* b) {
@@ -41,14 +43,22 @@ int64_t hook(uint32_t reserved)
     uint64_t reserve = base + ocount * inc;          /* <= 1e9 + 1e6*1e9 < 2^63: no wrap */
 
     /* The amount we want to push out. Small fixed amount so the reserve check, not the
-     * amount decode, is what's under test. Fee upper bound budgeted at 1000 drops. */
+     * amount decode, is what's under test. The fee is the network-dependent value the host
+     * will actually charge (etxn_fee_base) — which ESCALATES under load — NOT a hardcoded
+     * constant. Budgeting against the real fee is what keeps this hook reserve-safe for EVERY
+     * fee >= base; hardcoding a fixed budget would breach under fee escalation (a real bug). */
     uint64_t amount = 100;
-    uint64_t fee_budget = 1000;
+    int64_t fee_s = etxn_fee_base(0, 0);             /* required emit fee (>= host base fee) */
+    XAHC_REQUIRE(fee_s >= 0, "fee_base error");
+    uint64_t fee = (uint64_t)fee_s;
+    /* Refuse to emit if the network fee is absurd (> 1 XAH). A reserve-safe hook does not
+     * blindly pay an unbounded fee; this caps the fee it will accept and keeps spend small. */
+    XAHC_REQUIRE(fee <= 1000000ULL, "fee too high");
 
     /* HEADROOM CHECK (the safety gate): require balance covers reserve + amount + fee.
-     * Written to avoid wrap: compare balance against the (checked) sum. */
+     * amount and fee are both bounded small, so the sum cannot wrap. */
     XAHC_REQUIRE(balance >= reserve, "already below reserve");
-    uint64_t spend = amount + fee_budget;            /* small constants, no wrap */
+    uint64_t spend = amount + fee;                   /* <= 100 + 1e6, no wrap */
     XAHC_REQUIRE(balance - reserve >= spend, "emit would breach reserve");
 
     XAHC_EMIT_PAYMENT(DST, amount, 0, 0);

@@ -348,6 +348,35 @@ def test_reserve_adversarial_iou_emit_fails_closed():
     assert prove_reserve.main(os.path.join(H, "adv_reserve_iou.wasm")) == 3
 
 
+def test_reserve_fee_escalation_is_not_proven():
+    # SOUNDNESS (M-1 fix, 2026-06-16): the per-emit base fee is modeled SYMBOLICALLY (>= the
+    # host floor 10), NOT pinned at concrete 10. reserve_feebudget_bug gates its emit on
+    # headroom but budgets the fee as a HARDCODED 10 — so it is reserve-safe at fee=10 yet
+    # BREACHES the reserve once the network fee escalates above 10. Under the old concrete-10
+    # model this was a false PROVEN; under the symbolic fee it MUST surface a counterexample.
+    # Decisive assertion: a fee-escalation breach must NEVER slip to PROVEN (0).
+    v = prove_reserve.main(os.path.join(H, "reserve_feebudget_bug.wasm"))
+    assert v == 2, f"fee-escalation breach must be COUNTEREXAMPLE, not {v} (PROVEN=0 is a false PROVEN)"
+    # Conversely, the corrected reserve_ok hook budgets the REAL etxn_fee_base value, so it
+    # stays reserve-safe for EVERY fee >= base -> still PROVEN (the model is not vacuous).
+    assert prove_reserve.main(os.path.join(H, "reserve_ok.wasm")) == 0
+
+
+def test_reserve_base_fee_is_symbolic_not_concrete_ten():
+    # Pin the mechanism: after running an emitting hook, the shared per-emit fee symbol must be
+    # a free symbolic BitVec (not concrete 10) and each accept path's constraints must carry the
+    # `fee >= 10` floor. A regression to a concrete fee would re-open the M-1 false-PROVEN.
+    e = Engine(open(os.path.join(H, "reserve_ok.wasm"), "rb").read()); e.run()
+    assert e.emit_base_fee is not None, "no symbolic base fee created for an emitting hook"
+    assert not prover.Engine._is_concrete(e.emit_base_fee), "base fee must be symbolic, not concrete"
+    # the floor constraint (fee >= 10) must be present on every accepting path's fee record
+    feename = str(e.emit_base_fee)
+    for cons, fees, _count in e.fees_on_accept:
+        assert any(feename in str(f) for f in fees), "emit fee is not the shared symbolic fee"
+        blob = " ".join(str(c) for c in cons)
+        assert feename in blob and "10" in blob, "fee floor constraint (>= 10) missing on accept path"
+
+
 # --- #7 emission-burden (-13 TOO_MANY_EMITTED_TXN): the etxn_reserve count capture ----------
 
 def test_emission_engine_captures_reserve_count():
