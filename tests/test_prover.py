@@ -18,6 +18,7 @@ import prove_foreign_authz, prove_reserve, prove_time_nonce               # noqa
 import prove_emission                                                      # noqa: E402
 import prove_period_budget                                                 # noqa: E402
 import prove_reentrancy                                                     # noqa: E402
+import prove_unchecked_return                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -180,6 +181,13 @@ def test_matrix_verdicts():
     # N/A (exit 1): no cbak surface, or the period-budget contract (PLM/PER) — not this driver.
     assert prove_reentrancy.main(os.path.join(H, "limit.wasm")) == 1
     assert prove_reentrancy.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 1
+    # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
+    #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
+    #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
+    #   N/A -> a read-only hook performs no failable mutation on its accept path -> (1)
+    assert prove_unchecked_return.main(os.path.join(H, "unchecked_return_ok.wasm")) == 0
+    assert prove_unchecked_return.main(os.path.join(H, "unchecked_return_bug.wasm")) == 2
+    assert prove_unchecked_return.main(os.path.join(H, "limit.wasm")) == 1
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
@@ -206,6 +214,13 @@ def test_reentrancy_safe_proof_is_non_vacuous():
     e2 = Engine(open(os.path.join(H, "reentrancy_safe.wasm"), "rb").read()); e2.run(e2.cbak)
     assert any("\x01" in w for (_c, w, _e, _ec) in e2.returns_full), \
         "cbak should persist the budget slot on a normal-return path"
+
+
+def test_unchecked_return_adversarial_no_false_proven():
+    # PARTIAL CHECK: the hook checks state_set but rolls back only on rc < -100, letting real
+    # failures in [-100,-1] slip through to accept. The obligation (accept ⟹ rc >= 0) must
+    # still fire -> CEX, never PROVEN.
+    assert prove_unchecked_return.main(os.path.join(H, "unchecked_return_partial_bug.wasm")) == 2
 
 
 def test_authz_adversarial_no_false_proven():

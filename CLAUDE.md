@@ -39,6 +39,11 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
   re-entry emission chain is NOT modeled — never claim PROVEN there).
 - `prove_period_budget` — STATEFUL inductive step: prior spent≤PLM ⟹ persisted spent'≤PLM
   (+ per-tx LIM + DST lock). Slot 0x01 = [periodStart|spent].
+- `prove_unchecked_return` — SC06: accept ⟹ every failable `state_set`/`emit` return was
+  checked (no accept proceeds past a host-call failure). Opt-in engine flag
+  `check_mutation_ret` makes those host fns return a SYMBOLIC may-be-negative code (default off,
+  no other driver affected); a checked hook constrains it ≥0 on accept, an unchecked one leaves
+  it free. N/A (1) if the accept path performs no such mutation.
 - `prove_reentrancy` — SC05 cbak-safety INDUCTIVE step (the dynamic re-entry `prove_emission`
   fails closed on). Slot 0x01 = [reserved|spent], param LIM. Runs BOTH `hook` and `cbak` entries;
   proves reserve-before-emit (spent' ≥ spent+Σemit, no deferred accounting), cap (spent'≤LIM),

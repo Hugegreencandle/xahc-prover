@@ -58,7 +58,7 @@ class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
                  "writes_bytes",
                  "emit_count", "emits", "emits_iou", "fees", "fsets",
-                 "reserve_n", "reserve_calls")
+                 "reserve_n", "reserve_calls", "mutation_rets")
 
     def __init__(self):
         self.stack: list = []
@@ -87,6 +87,13 @@ class Path:
         # so the driver can fail closed on a second (symbolic-binding-ambiguous) reservation.
         self.reserve_n = None     # BitVec64 declared emit budget (first etxn_reserve), or None
         self.reserve_calls: int = 0  # how many etxn_reserve calls occurred on this path
+        # ---- SC06 unchecked-return ----
+        # Symbolic return codes of FAILABLE state-mutating host fns (state_set / emit) created
+        # on this path, ONLY when Engine.check_mutation_ret is set (opt-in; default off keeps
+        # every other driver's concrete-success model unchanged). prove_unchecked_return asserts
+        # that an accepting path leaves none of these unconstrained-negative (i.e. each failure
+        # was checked + rolled back). Each entry: (sym_ret_bv, label).
+        self.mutation_rets: list = []
 
     def clone(self) -> "Path":
         p = Path()
@@ -105,6 +112,7 @@ class Path:
         p.fsets = list(self.fsets)
         p.reserve_n = self.reserve_n
         p.reserve_calls = self.reserve_calls
+        p.mutation_rets = list(self.mutation_rets)
         return p
 
 
@@ -156,6 +164,15 @@ class Engine:
         # The `cbak` callback function object (or None). prove_reentrancy runs it as a separate
         # entry point to analyze the emit -> settlement re-entry surface.
         self.cbak = next((f for f in self.funcs if getattr(f, "name", None) == "cbak"), None)
+        # ---- SC06 unchecked-return (opt-in) ----
+        # When True, the FAILABLE state-mutating host fns (state_set / emit) return a SYMBOLIC
+        # 64-bit code that MAY be negative (the failure the host can return), instead of a
+        # concrete success. A hook that checks the code (XAHC_TRY) rolls back on the negative
+        # branch, so the constraint shows up on its accept paths; a hook that ignores it leaves
+        # the code free. prove_unchecked_return sets this before run(); default off so no other
+        # driver's model changes. Per-accept snapshots land in mutation_rets_on_accept.
+        self.check_mutation_ret = False
+        self.mutation_rets_on_accept: list = []  # (cons, [(sym_ret, label), ...]) per accept
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
         # unroll bound. If True, the analysis is INCOMPLETE and must NOT claim
@@ -488,6 +505,14 @@ class Engine:
             vbytes = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian value
             p.writes[kn] = z3.Concat(*vbytes) if n > 1 else vbytes[0]
             p.writes_bytes[kn] = list(vbytes)   # byte-exact, for same-invocation read-after-write
+            if self.check_mutation_ret:
+                # SC06: the host can FAIL a state_set (e.g. reserve/internal error). Model the
+                # return as a symbolic code that may be negative so an UNCHECKED accept is
+                # reachable; a checked hook constrains it >= 0 on its accept path.
+                idx = len(self.mutation_rets_on_accept) + len(p.mutation_rets)
+                ret = z3.BitVec(f"state_set_ret:{idx}", 64)
+                p.mutation_rets.append((ret, f"state_set#{idx}"))
+                st.append(ret); return
             st.append(z3.BitVecVal(n, 64)); return
         # ---- foreign-state host fns (#6 foreign-state authorization) ----
         if name == "state_foreign":
@@ -614,6 +639,14 @@ class Engine:
             # under fee escalation (an under-count would be a false PROVEN for reserve safety).
             # `etxn_fee_base` and `emit` share ONE symbol via _base_fee — they cannot diverge.
             p.fees.append(self._base_fee(p))
+            if self.check_mutation_ret:
+                # SC06: emit can FAIL (-13 over-reserve, -1 malformed, etc.). Symbolic, may be
+                # negative, so an UNCHECKED emit-then-accept is reachable; a checked emit
+                # constrains it >= 0 on the accept path.
+                idx = len(self.mutation_rets_on_accept) + len(p.mutation_rets)
+                ret = z3.BitVec(f"emit_ret:{idx}", 64)
+                p.mutation_rets.append((ret, f"emit#{idx}"))
+                st.append(ret); return
             st.append(z3.BitVecVal(32, 64)); return                 # >=0 = emitted hash len
         # ================= XFL (issued-amount) float host fns =================
         # DISCIPLINE (money-hooks): EXACT bit-ops where possible; FOLD-TO-LITERAL via
@@ -807,6 +840,7 @@ class Engine:
                 self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))
                 self.emission_on_accept.append(
                     (list(p.cons), p.emit_count, p.reserve_n, p.reserve_calls))
+                self.mutation_rets_on_accept.append((list(p.cons), list(p.mutation_rets)))
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
