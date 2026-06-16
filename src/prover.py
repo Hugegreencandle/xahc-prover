@@ -131,6 +131,12 @@ class Engine:
         self.inputs: dict = {}       # name -> list[BitVec(8)] symbolic input bytes
         self.accepts: list = []      # (code:int|None, cons) per accepting path
         self.accepts_full: list = [] # (code, cons, writes) — same paths, with state writes
+        # Per NORMAL-termination path (fallthrough / explicit `return`, NO accept/rollback):
+        # (cons, writes, emits, emit_count). Needed to analyze entry points such as `cbak`,
+        # which settle an emitted txn and return WITHOUT calling accept/rollback — so their
+        # committed state writes never land in accepts_full. Populated by run() for whatever
+        # entry function was executed; empty for a normal `hook` run (hooks always accept/rollback).
+        self.returns_full: list = []
         self.rollbacks: list = []    # (code, cons)
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
@@ -147,6 +153,9 @@ class Engine:
         # grow across re-entries the engine does NOT model. The emission driver uses this to
         # fail closed (INCONCLUSIVE) — it only proves the STATIC per-invocation reserve bound.
         self.has_cbak = any(getattr(f, "name", None) == "cbak" for f in self.funcs)
+        # The `cbak` callback function object (or None). prove_reentrancy runs it as a separate
+        # entry point to analyze the emit -> settlement re-entry surface.
+        self.cbak = next((f for f in self.funcs if getattr(f, "name", None) == "cbak"), None)
         self._g_idx = self.imports.index("_g") if "_g" in self.imports else -1
         # SOUNDNESS: set when a still-feasible loop back-edge is dropped at the
         # unroll bound. If True, the analysis is INCOMPLETE and must NOT claim
@@ -883,8 +892,10 @@ class Engine:
         return (xflv, cur, iss)
 
     # ---- the interpreter ----
-    def run(self):
-        f = self.hook
+    def run(self, entry=None):
+        # `entry` defaults to the `hook` export. prove_reentrancy passes self.cbak to analyze
+        # the callback entry point. Backward-compatible: existing callers run the hook unchanged.
+        f = entry if entry is not None else self.hook
         p = Path()
         # params + locals at their DECLARED widths (i64 locals must init 64-bit, or a
         # read-before-write would be a wrong-width 0).
@@ -902,7 +913,15 @@ class Engine:
         for off, data in self.datas:
             for k, b in enumerate(data):
                 p.mem[off + k] = z3.BitVecVal(b, 8)
-        self._exec_seq(f.body, [p])
+        results = self._exec_seq(f.body, [p])
+        # Capture NORMAL-termination paths (fell through to the end, or hit a top-level
+        # `return`) WITHOUT having called accept/rollback. The hook entry always terminates
+        # via accept/rollback (Terminal), so this stays empty for a hook run; cbak returns
+        # normally, so this is where its committed state writes / emits are recorded.
+        for sig, pp in results:
+            if sig is None or (isinstance(sig, tuple) and sig and sig[0] == "return"):
+                self.returns_full.append(
+                    (list(pp.cons), dict(pp.writes), list(pp.emits), pp.emit_count))
 
     def _exec_seq(self, instrs, paths):
         """Execute a sequence over a list of live paths. Returns list of

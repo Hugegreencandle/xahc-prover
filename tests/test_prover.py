@@ -17,6 +17,7 @@ import prove_authz, prove_validate, prove_overflow                        # noqa
 import prove_foreign_authz, prove_reserve, prove_time_nonce               # noqa: E402
 import prove_emission                                                      # noqa: E402
 import prove_period_budget                                                 # noqa: E402
+import prove_reentrancy                                                     # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -169,12 +170,43 @@ def test_matrix_verdicts():
     #   budgetbug (checks amount<=PLM, ignores prior spent) -> COUNTEREXAMPLE (2)
     assert prove_period_budget.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 0
     assert prove_period_budget.main(os.path.join(H, "agent_guardrail_stateful_budgetbug.wasm")) == 2
+    # SC05 REENTRANCY / cbak-safety (reserve-before-emit + no-refund-leak, INDUCTIVE STEP):
+    #   safe         -> reserves before emit; cbak releases only the reservation -> PROVEN (0)
+    #   deferred_bug -> emits but records the spend only in cbak    -> COUNTEREXAMPLE (2, cover)
+    #   refund_bug   -> cbak wipes the whole spend, not just reserved -> COUNTEREXAMPLE (2, floor)
+    assert prove_reentrancy.main(os.path.join(H, "reentrancy_safe.wasm")) == 0
+    assert prove_reentrancy.main(os.path.join(H, "reentrancy_deferred_bug.wasm")) == 2
+    assert prove_reentrancy.main(os.path.join(H, "reentrancy_refund_bug.wasm")) == 2
+    # N/A (exit 1): no cbak surface, or the period-budget contract (PLM/PER) — not this driver.
+    assert prove_reentrancy.main(os.path.join(H, "limit.wasm")) == 1
+    assert prove_reentrancy.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 1
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
 # Hooks compiled with xahc and committed as adv_*.wasm. Each probes a way an
 # attacker could try to win a false PROVEN; the decisive assertion is that the
 # driver NEVER says PROVEN(0) when the invariant is actually violable.
+
+def test_reentrancy_adversarial_no_false_proven():
+    # PARTIAL RESERVE: emits `amount` but records only amount/2 — a subtler deferred-accounting
+    # bug than recording nothing. The cover obligation (spent' >= spent + Σ emitted) must still
+    # fire -> CEX, never PROVEN.
+    assert prove_reentrancy.main(os.path.join(H, "reentrancy_partial_bug.wasm")) == 2
+
+
+def test_reentrancy_safe_proof_is_non_vacuous():
+    # The safe PROVEN must rest on a REAL feasible emitting accept path (else `cover` is
+    # vacuously satisfied). Assert the reference hook actually emits on a feasible accept path.
+    e = Engine(open(os.path.join(H, "reentrancy_safe.wasm"), "rb").read()); e.run()
+    emitting = [(cons, emits) for (cons, emits, _ec) in e.emits_on_accept if emits]
+    assert emitting, "reentrancy_safe should have an accepting path that emits"
+    assert any(prover.feasible(cons) for cons, _ in emitting), \
+        "the emitting accept path must be feasible (else the cover obligation is vacuous)"
+    # And the cbak entry must produce an analyzable normal-return path with a state write.
+    e2 = Engine(open(os.path.join(H, "reentrancy_safe.wasm"), "rb").read()); e2.run(e2.cbak)
+    assert any("\x01" in w for (_c, w, _e, _ec) in e2.returns_full), \
+        "cbak should persist the budget slot on a normal-return path"
+
 
 def test_authz_adversarial_no_false_proven():
     # PREFIX MATCH: compares only the first 4 of 20 account bytes. An attacker

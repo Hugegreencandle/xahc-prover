@@ -37,6 +37,13 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
 - `prove_emission` — accept ⟹ emit_count ≤ `etxn_reserve(n)` (static reserve-count bound, `-13`).
   STATIC SCOPE ONLY: fails closed to INCONCLUSIVE whenever the module exports `cbak` (the dynamic
   re-entry emission chain is NOT modeled — never claim PROVEN there).
+- `prove_period_budget` — STATEFUL inductive step: prior spent≤PLM ⟹ persisted spent'≤PLM
+  (+ per-tx LIM + DST lock). Slot 0x01 = [periodStart|spent].
+- `prove_reentrancy` — SC05 cbak-safety INDUCTIVE step (the dynamic re-entry `prove_emission`
+  fails closed on). Slot 0x01 = [reserved|spent], param LIM. Runs BOTH `hook` and `cbak` entries;
+  proves reserve-before-emit (spent' ≥ spent+Σemit, no deferred accounting), cap (spent'≤LIM),
+  no-refund-leak (spent' ≥ spent−reserved). N/A (1) if no cbak export or it's the PLM/PER
+  period-budget contract. (Engine: `run(entry)` + `returns_full` capture normal-return paths.)
 All are reachable via `xahc prove <hook> --invariant <name>` (in the xahc repo).
 
 ## SOUNDNESS IS THE PRODUCT — the one rule that matters
