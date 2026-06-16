@@ -16,6 +16,7 @@ import prove_limit_iou                                                    # noqa
 import prove_authz, prove_validate, prove_overflow                        # noqa: E402
 import prove_foreign_authz, prove_reserve, prove_time_nonce               # noqa: E402
 import prove_emission                                                      # noqa: E402
+import prove_period_budget                                                 # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -163,6 +164,11 @@ def test_matrix_verdicts():
     assert prove_emission.main(os.path.join(H, "emission_ok.wasm")) == 0
     assert prove_emission.main(os.path.join(H, "emission_bug.wasm")) == 2
     assert prove_emission.main(os.path.join(H, "emission_cbak.wasm")) == 3
+    # STATEFUL period-budget INDUCTIVE STEP (spent<=PLM => spent'<=PLM, +per-tx, +dst):
+    #   real stateful guardrail -> PROVEN (0)
+    #   budgetbug (checks amount<=PLM, ignores prior spent) -> COUNTEREXAMPLE (2)
+    assert prove_period_budget.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 0
+    assert prove_period_budget.main(os.path.join(H, "agent_guardrail_stateful_budgetbug.wasm")) == 2
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
@@ -258,6 +264,57 @@ def test_foreign_authz_failclosed_on_unknown_account():
 def test_foreign_authz_only_flagged_when_set_present():
     # A hook that never writes foreign state is N/A (1), not a false PROVEN/CEX.
     assert prove_foreign_authz.main(os.path.join(H, "limit.wasm")) == 1
+
+
+def test_period_budget_proof_is_non_vacuous():
+    # SOUNDNESS of the inductive-step proof: the buggy variant (checks amount<=PLM,
+    # ignoring prior spent) MUST be caught as a COUNTEREXAMPLE, AND that CEX must be a
+    # genuine same-period over-budget witness in which the INDUCTIVE HYPOTHESIS holds
+    # (prior spent <= PLM) yet the persisted spent' > PLM. We re-derive the witness here
+    # to prove the proof actually bites and isn't vacuously UNSAT.
+    import prove_period_budget as ppb
+    e = Engine(open(os.path.join(H, "agent_guardrail_stateful_budgetbug.wasm"), "rb").read())
+    e.run()
+    old = e.state_old[ppb.STATE_KEY]
+    assert len(old) == 16
+    PLM = z3.Concat(*e.inputs["param:PLM"])
+    spent_old = z3.Concat(*old[8:16])
+    hyp = z3.ULE(spent_old, PLM)
+    budget_paths = [(c, cons, w) for (c, cons, w) in e.accepts_full if ppb.STATE_KEY in w]
+    assert budget_paths, "buggy variant must still persist the budget slot"
+    found = False
+    for code, cons, writes in budget_paths:
+        new_spent = z3.Extract(63, 0, writes[ppb.STATE_KEY])
+        s = z3.Solver()
+        s.add(*cons); s.add(hyp); s.add(z3.UGT(new_spent, PLM))
+        if s.check() == z3.sat:
+            m = s.model()
+            ev = lambda b: m.eval(b, model_completion=True).as_long()
+            # hypothesis truly holds in the witness, and spent' truly exceeds PLM
+            assert ev(spent_old) <= ev(PLM)
+            assert ev(new_spent) > ev(PLM)
+            found = True
+            break
+    assert found, "buggy variant should expose an in-budget-prior -> over-budget-persist witness"
+    # and the real hook must NOT expose such a witness (no false PROVEN check duplication)
+    assert ppb.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 0
+    assert ppb.main(os.path.join(H, "agent_guardrail_stateful_budgetbug.wasm")) == 2
+
+
+def test_period_budget_state_read_is_16_byte_symbolic_prior():
+    # The inductive step depends on the PRIOR spent being a SYMBOLIC 16-byte value
+    # (state_old), so the hypothesis spent<=PLM is a real constraint over the adversarial
+    # case (the slot already holds something). If state were modeled as fresh/zero the
+    # proof would be vacuous. Assert the engine exposes the symbolic 16-byte prior.
+    import prove_period_budget as ppb
+    e = Engine(open(os.path.join(H, "agent_guardrail_stateful.wasm"), "rb").read())
+    e.run()
+    assert ppb.STATE_KEY in e.state_old
+    assert len(e.state_old[ppb.STATE_KEY]) == 16
+    assert e.inputs.get("ledger_seq") is not None       # `now` is symbolic
+    assert e.inputs.get("param:PLM") is not None
+    # no unsupported opcode / unroll-bound on the real hook (else verdict would be INCONCLUSIVE)
+    assert not e.unsupported and not e.hit_bound
 
 
 def test_reserve_negation_is_correct():
