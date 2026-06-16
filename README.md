@@ -51,6 +51,9 @@ Three open-source tools, one workflow: **write → simulate one tx → prove all
 | **simulate one** | [xahau-mcp](https://github.com/Hugegreencandle/xahau-mcp) | run the real bytecode against one live transaction |
 | **prove all** | [xahc-prover](https://github.com/Hugegreencandle/xahc-prover) | prove an invariant holds for every input in scope — or return the counterexample |
 
+📋 **[OWASP Smart Contract Top 10 (2025) coverage →](docs/SC-TOP-10-COVERAGE.md)** — which of
+the SC Top 10 xahc-prover proves, mapped to invariants, with honest out-of-domain notes.
+
 ## Demo
 
 ```sh
