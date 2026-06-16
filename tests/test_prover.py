@@ -19,6 +19,7 @@ import prove_emission                                                      # noq
 import prove_period_budget                                                 # noqa: E402
 import prove_reentrancy                                                     # noqa: E402
 import prove_unchecked_return                                               # noqa: E402
+import prove_validate_range                                                 # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -188,6 +189,13 @@ def test_matrix_verdicts():
     assert prove_unchecked_return.main(os.path.join(H, "unchecked_return_ok.wasm")) == 0
     assert prove_unchecked_return.main(os.path.join(H, "unchecked_return_bug.wasm")) == 2
     assert prove_unchecked_return.main(os.path.join(H, "limit.wasm")) == 1
+    # SC04 RANGE VALIDATION (accept ⟹ VAL present AND LO_ <= VAL <= HI_):
+    #   ok    -> both bounds checked              -> PROVEN (0)
+    #   bug   -> upper bound omitted (VAL > HI_)  -> COUNTEREXAMPLE (2)
+    #   N/A   -> hook doesn't read the contract   -> (1)
+    assert prove_validate_range.main(os.path.join(H, "validate_range_ok.wasm")) == 0
+    assert prove_validate_range.main(os.path.join(H, "validate_range_bug.wasm")) == 2
+    assert prove_validate_range.main(os.path.join(H, "limit.wasm")) == 1
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
@@ -214,6 +222,12 @@ def test_reentrancy_safe_proof_is_non_vacuous():
     e2 = Engine(open(os.path.join(H, "reentrancy_safe.wasm"), "rb").read()); e2.run(e2.cbak)
     assert any("\x01" in w for (_c, w, _e, _ec) in e2.returns_full), \
         "cbak should persist the budget slot on a normal-return path"
+
+
+def test_validate_range_adversarial_no_false_proven():
+    # The MIRROR omission: checks the upper bound but OMITS the lower bound, accepting VAL < LO_.
+    # The range obligation (OR(below LO_, above HI_)) must catch the other side too -> CEX.
+    assert prove_validate_range.main(os.path.join(H, "validate_range_lobug.wasm")) == 2
 
 
 def test_unchecked_return_adversarial_no_false_proven():

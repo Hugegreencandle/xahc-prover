@@ -39,6 +39,9 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
   re-entry emission chain is NOT modeled — never claim PROVEN there).
 - `prove_period_budget` — STATEFUL inductive step: prior spent≤PLM ⟹ persisted spent'≤PLM
   (+ per-tx LIM + DST lock). Slot 0x01 = [periodStart|spent].
+- `prove_validate_range` — SC04 deepening of `prove_validate`: accept ⟹ param VAL present AND
+  LO_ ≤ VAL ≤ HI_ (within its declared bounds), not just present. Contract params VAL/LO_/HI_
+  (8B BE each). N/A (1) if the hook doesn't read them.
 - `prove_unchecked_return` — SC06: accept ⟹ every failable `state_set`/`emit` return was
   checked (no accept proceeds past a host-call failure). Opt-in engine flag
   `check_mutation_ret` makes those host fns return a SYMBOLIC may-be-negative code (default off,
