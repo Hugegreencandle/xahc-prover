@@ -45,6 +45,15 @@ def main(path: str) -> int:
               "CAN (32-byte candidate hash). Not analyzable by this driver.")
         return 1
 
+    # Non-vacuity (BL-INFO-1): a gate that reads PIN/CAN but NEVER accepts would make the
+    # accept ⟹ match obligation vacuously true and print a misleading "cannot hand control" banner.
+    # Disclose instead (mirrors prove_unchecked_return's 0-accept N/A), so PROVEN only ever
+    # describes a gate that actually accepts on some input.
+    if not e.accepts:
+        print("N/A — the gate has 0 accepting paths; the accept ⟹ (candidate == pinned) "
+              "obligation is vacuous, not claimed.")
+        return 1
+
     # negation of the invariant: an accepting path where ANY of the 32 bytes differ.
     mismatch = z3.Or(*[pin[i] != can[i] for i in range(N)])
 

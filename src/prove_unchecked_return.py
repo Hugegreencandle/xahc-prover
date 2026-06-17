@@ -42,6 +42,20 @@ def main(path: str) -> int:
     accepts = e.mutation_rets_on_accept
     feasible_accepts = [(c, r) for (c, r) in accepts if feasible(c)]
 
+    # FAIL CLOSED FIRST (CLAUDE.md): if the analysis was INCOMPLETE — a symbolic-float
+    # over-approx, an unsupported opcode, or an unroll-bound truncation — it may have ERASED the
+    # accept paths / mutations before they were snapshotted. Reporting N/A ("property doesn't
+    # apply") for an incomplete run mislabels incompleteness as inapplicability. So gate before
+    # the N/A early-returns: incompleteness => INCONCLUSIVE(3), never N/A(1).
+    if e.float_overapprox or e.unsupported or e.hit_bound:
+        why = []
+        if e.float_overapprox: why.append(f"float op(s) {sorted(e.float_overapprox)} over-approximated")
+        if e.unsupported: why.append(f"unsupported opcode(s) {sorted(e.unsupported)} reached")
+        if e.hit_bound: why.append("a loop exceeded the unroll bound")
+        print(f"\n⚠️ INCONCLUSIVE — analysis incomplete ({'; '.join(why)}); accept paths/mutations "
+              "may be unexplored, so cannot claim N/A or PROVEN.")
+        return 3
+
     if not feasible_accepts:
         print("N/A — the hook has no feasible accepting path; the universal "
               "accept ⟹ checked-return property is vacuous (0 accepting paths). Not claimed.")
@@ -75,19 +89,7 @@ def main(path: str) -> int:
                 print("   Fix: check the return (e.g. XAHC_TRY) and roll back on < 0.")
                 return 2
 
-    # fail-closed gates (after the obligation, BEFORE any PROVEN)
-    if e.float_overapprox:
-        print(f"\n⚠️ INCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} over-approximated; "
-              "not PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; "
-              "not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
-
+    # (fail-closed incompleteness gates already checked at the top, before the N/A returns.)
     print("\n✅ PROVEN — for ALL inputs, every accepting path checked the return code of each "
           "failable state_set / emit it performed (no accept proceeds past a host-call "
           "failure). SC06 unchecked-return: clean.")

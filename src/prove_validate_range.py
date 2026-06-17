@@ -49,7 +49,14 @@ def main(path: str) -> int:
     HI = z3.Concat(*hi)
     ret_val = e.inputs.get("hook_param_ret:VAL")   # presence code (signed; < 0 = absent)
 
-    print(f"explored: {len(e.accepts)} accepting path(s); checking VAL ∈ [LO_, HI_]")
+    # Non-vacuity (VR-02): a hook that reads VAL/LO_/HI_ but never accepts would make the
+    # universal "accept ⟹ ..." obligation vacuously true. Disclose rather than print a clean PROVEN.
+    if not e.accepts:
+        print("N/A — the hook has 0 accepting paths; the accept ⟹ in-range obligation is "
+              "vacuous, not claimed.")
+        return 1
+
+    print(f"explored: {len(e.accepts)} accepting path(s); checking VAL ∈ [LO_, HI_] (UNSIGNED)")
 
     for code, cons in e.accepts:
         # (presence) accept ⟹ VAL present — a strict superset of prove_validate.
@@ -65,7 +72,11 @@ def main(path: str) -> int:
                       "(fail-open): the unset value was trusted.")
                 return 2
 
-        # (range) accept ⟹ LO <= VAL <= HI. Negation: VAL below LO OR above HI (unsigned).
+        # (range) accept ⟹ LO <= VAL <= HI, UNSIGNED. Negation: VAL below LO OR above HI.
+        # SCOPE (VR-01): this contract is UNSIGNED (ULT/UGT). A hook validating a SIGNED int64
+        # range (i64.ge_s/le_s) is judged under unsigned semantics — soundness-safe (never a false
+        # PROVEN) but it can spuriously COUNTEREXAMPLE a correct signed hook. Signed-range support
+        # is out of this driver's contract; the messages below say "unsigned" so the verdict is honest.
         s = z3.Solver(); s.set("timeout", 120000)
         s.add(*cons)
         s.add(z3.Or(z3.ULT(VAL, LO), z3.UGT(VAL, HI)))   # out of the declared range
@@ -75,10 +86,12 @@ def main(path: str) -> int:
             return 3
         if r == z3.sat:
             m = s.model(); ev = lambda b: m.eval(b, model_completion=True).as_long()
-            print("\n❌ COUNTEREXAMPLE — accepts a VAL OUTSIDE its declared [LO_, HI_] range:")
+            print("\n❌ COUNTEREXAMPLE — accepts a VAL OUTSIDE its declared [LO_, HI_] range "
+                  "(unsigned):")
             print(f"   VAL={ev(VAL)}  LO_={ev(LO)}  HI_={ev(HI)}  "
                   f"({'below LO_' if ev(VAL) < ev(LO) else 'above HI_'}) — bounds not fully "
-                  "enforced (a half/missing range check).")
+                  "enforced (a half/missing range check). NOTE: comparison is UNSIGNED; a signed "
+                  "int64 range hook is out of this driver's contract.")
             return 2
 
     if e.unsupported:
@@ -89,7 +102,8 @@ def main(path: str) -> int:
         return 3
 
     print("\n✅ PROVEN — for ALL inputs, the hook never accepts unless VAL is present AND within "
-          "its declared [LO_, HI_] bounds (LO_ <= VAL <= HI_). SC04 range validation: clean.")
+          "its declared [LO_, HI_] bounds (UNSIGNED LO_ <= VAL <= HI_). SC04 range validation: "
+          "clean. (Scope: unsigned comparison; signed-range hooks are out of contract.)")
     return 0
 
 
