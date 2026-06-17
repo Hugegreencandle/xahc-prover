@@ -16,7 +16,16 @@ ALL inputs, or returns a concrete counterexample. Third leg of the trifecta:
 - `src/wasm.py` — WASM decoder → instruction tree.
 - `src/xfl.py` — XFL (issued-amount float) constants/helpers.
 - `src/prove_*.py` — one driver per invariant (see below). Each returns an exit code.
+- `src/watch/` — **xahc-watch, the fourth leg** (write→simulate→prove→WATCH live). Binds a proof
+  to a deployed hook + continuously attests it. `predicates.py` = the shared guardrail rule (one
+  definition, z3 + concrete backends — `prove_guardrail.py` and the watcher CANNOT fork it);
+  `manifest.py` = the prove→watch seam (HookHash=SHA-512Half(wasm); a non-PROVEN run can't emit a
+  manifest); `ledger.py` = decode + live ws transport (lazy `websockets`); `watch.py` = classify
+  each tx into CONSISTENT / VIOLATION / PROOF_VOID / UNVERIFIED (no implicit "ok"; UNVERIFIED is
+  watch's INCONCLUSIVE). `python -m watch <manifest> --replay <fixture>|--ws <url>`. See
+  `docs/XAHC-WATCH.md`. Deps: `xrpl-py` (addr codec) + `websockets` (offline tests need neither).
 - `tests/test_prover.py` — regression matrix + soundness tests. Run after ANY engine change.
+  (Folds in `tests/test_raw.py` + `tests/test_watch.py` under one runner.)
 - `hooks/*.c` + `hooks/*.wasm` — demo hooks (correct + buggy variants). The `.wasm` fixtures
   are committed (gitignored by default; force-added) so tests run without a wasm toolchain.
 

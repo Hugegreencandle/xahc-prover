@@ -1951,6 +1951,9 @@ if __name__ == "__main__":
     # also run the read-after-write adversarial suite (separate module, one runner)
     import test_raw
     fns += [v for k, v in sorted(vars(test_raw).items()) if k.startswith("test_")]
+    # and the xahc-watch suite (predicate parity, manifest, testnet replay, fail-closed)
+    import test_watch
+    fns += [v for k, v in sorted(vars(test_watch).items()) if k.startswith("test_")]
     for fn in fns:
         fn()
         print(f"ok  {fn.__name__}")
