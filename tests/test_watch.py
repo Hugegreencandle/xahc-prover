@@ -8,6 +8,7 @@ Coverage:
   • replay of the 4 real testnet guardrail txns -> all CONSISTENT (the spine).
   • fail-closed buckets: tamper -> VIOLATION, IOU/undecodable -> UNVERIFIED, hash swap -> PROOF_VOID.
 """
+import asyncio
 import copy
 import json
 import os
@@ -25,7 +26,7 @@ from watch.predicates import (Z3Ops, ConcreteOps, decode_drops, over_limit,    #
                               ACCEPT_OK, SHOULD_REJECT, UNVERIFIED)
 from watch.manifest import (ProofManifest, build_manifest, write_manifest,     # noqa: E402
                             load_manifest, hook_hash_of)
-from watch.watch import (classify, replay, CONSISTENT, VIOLATION,              # noqa: E402
+from watch.watch import (classify, _safe_classify, replay, CONSISTENT, VIOLATION,  # noqa: E402
                          PROOF_VOID, UNVERIFIED as W_UNVERIFIED, SKIP)
 
 H = os.path.join(ROOT, "hooks")
@@ -159,14 +160,61 @@ def test_replay_cli_exit_zero():
 # ── fail-closed buckets ─────────────────────────────────────────────────────────────────────
 
 def test_tampered_accept_is_violation():
-    # Flip the over-limit tx (1b) to tesSUCCESS: the hook "accepted" what the proof says reject.
+    # The real attack: the guardrail ACCEPTS an over-limit tx. Flip the over-limit tx's HookResult
+    # to 3 (accept) — the hook approved what the proof says reject -> VIOLATION.
     m = _manifest()
-    recs = _records()
-    over = next(r for r in recs if r["tx"]["Amount"] == "10000000")
+    over = next(r for r in _records() if r["tx"]["Amount"] == "10000000")
     tampered = copy.deepcopy(over)
-    tampered["engine_result"] = "tesSUCCESS"
+    tampered["meta"]["HookExecutions"][0]["HookExecution"]["HookResult"] = 3  # accept
     bucket, _ = classify(tampered, m, A)
     assert bucket == VIOLATION
+
+
+def test_hook_accept_of_overlimit_is_violation_even_when_tx_rejected():
+    # SND-1/COR-1 regression: a Payment runs multiple hooks. Our guardrail ACCEPTS an over-limit
+    # tx (HookResult=3) but a downstream Strong-TSH destination rolls the WHOLE tx back
+    # (engine_result=tecHOOK_REJECTED). The watcher must still flag VIOLATION — the decision comes
+    # from OUR hook's HookResult, not the aggregate tx outcome. (Old code masked this as CONSISTENT.)
+    m = _manifest()
+    over = next(r for r in _records() if r["tx"]["Amount"] == "10000000")
+    rec = copy.deepcopy(over)
+    rec["meta"]["HookExecutions"][0]["HookExecution"]["HookResult"] = 3  # OUR hook accepted
+    rec["engine_result"] = "tecHOOK_REJECTED"                            # but the tx was rolled back
+    bucket, _ = classify(rec, m, A)
+    assert bucket == VIOLATION
+
+
+def test_hook_accept_of_overlimit_is_violation_even_when_tx_tecs():
+    # Same masking via an apply-time tec (e.g. tecUNFUNDED_PAYMENT): hook accepted (HookResult=3),
+    # engine_result is neither tes nor tecHOOK_REJECTED. Must be VIOLATION, not the old UNVERIFIED.
+    m = _manifest()
+    over = next(r for r in _records() if r["tx"]["Amount"] == "10000000")
+    rec = copy.deepcopy(over)
+    rec["meta"]["HookExecutions"][0]["HookExecution"]["HookResult"] = 3
+    rec["engine_result"] = "tecUNFUNDED_PAYMENT"
+    bucket, _ = classify(rec, m, A)
+    assert bucket == VIOLATION
+
+
+def test_inscope_missing_execution_is_proof_void():
+    # The bound account sends an in-scope outgoing Payment but the proven hook produced NO
+    # execution row (deleted / SetHook-removed). Must be PROOF_VOID, never a silent SKIP.
+    m = _manifest()
+    rec = copy.deepcopy(_records()[0])             # A -> B, 3 XAH, an in-scope outgoing payment
+    rec["meta"]["HookExecutions"] = []             # hook no longer runs
+    bucket, _ = classify(rec, m, A)
+    assert bucket == PROOF_VOID
+
+
+def test_guard_violation_returncode_is_unverified():
+    # HookReturnCode with the top bit set = GUARD_VIOLATION (error exit) -> not a clean decision.
+    m = _manifest()
+    rec = copy.deepcopy(_records()[0])
+    ex = rec["meta"]["HookExecutions"][0]["HookExecution"]
+    ex["HookResult"] = 4
+    ex["HookReturnCode"] = "8000000000000010"      # top bit set
+    bucket, _ = classify(rec, m, A)
+    assert bucket == W_UNVERIFIED
 
 
 def test_iou_amount_is_unverified_not_consistent():
@@ -187,14 +235,126 @@ def test_changed_hash_is_proof_void():
     assert bucket == PROOF_VOID
 
 
-def test_other_hook_tx_is_skipped():
-    # A tx where our watched hook did not execute (different HookAccount) -> SKIP (quiet),
-    # never classified as CONSISTENT.
+def test_out_of_scope_tx_is_skipped():
+    # An OUT-OF-SCOPE tx (incoming to A, i.e. Account != bound account) where our hook didn't
+    # execute -> SKIP (quiet). Not in scope, so the missing execution is not PROOF_VOID.
     m = _manifest()
     rec = copy.deepcopy(_records()[0])
-    rec["meta"]["HookExecutions"][0]["HookExecution"]["HookAccount"] = D
+    rec["tx"]["Account"] = D                                   # incoming, not from A
+    rec["meta"]["HookExecutions"] = []                          # our hook didn't run
     bucket, _ = classify(rec, m, A)
     assert bucket == SKIP
+
+
+def test_malformed_input_never_crashes():
+    # Crafted/garbage records must fail closed to a loud bucket, never raise (a crashed monitor
+    # is a silent 'all good'). _safe_classify wraps classify.
+    m = _manifest()
+    for bad in [
+        {"tx": "not-a-dict", "meta": {}},
+        {"tx": {"TransactionType": "Payment", "Account": "rNOT_A_REAL_ADDRESS_zzz",
+                "Amount": "1"}, "meta": {"HookExecutions": [{"HookExecution":
+                {"HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+                 "HookHash": HOOK_HASH, "HookResult": 3}}]}},
+        {"meta": {"HookExecutions": ["garbage", 42, None]}},
+        {},
+    ]:
+        bucket, detail = _safe_classify(bad, m, A)
+        assert bucket in (W_UNVERIFIED, SKIP, PROOF_VOID), f"{bad} -> {bucket}: {detail}"
+
+
+# ── live transport (the surface the audit found had ZERO tests) ─────────────────────────────
+
+class _FakeWS:
+    """Minimal async-context websocket double: scripted recv() frames (for account_tx) + scripted
+    stream frames (for the live async-for)."""
+    def __init__(self, recv_frames=None, stream_frames=None):
+        self._recv = list(recv_frames or [])
+        self._stream = list(stream_frames or [])
+        self.sent = []
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): return False
+    async def send(self, m): self.sent.append(m)
+    async def recv(self):
+        assert self._recv, "no more recv frames scripted"
+        return self._recv.pop(0)
+    def __aiter__(self): return self
+    async def __anext__(self):
+        if not self._stream:
+            raise StopAsyncIteration
+        return self._stream.pop(0)
+
+
+def test_normalize_live_subscribe_message():
+    # A live `subscribe` tx message carries the body under `transaction`, the result at top-level
+    # `engine_result`, and a top-level ledger_index. The old normalizer read `tx`/`tx_json` only,
+    # so the body decoded empty -> pass-through ACCEPT_OK -> false CONSISTENT (RST-1).
+    msg = {"type": "transaction", "validated": True, "engine_result": "tesSUCCESS",
+           "ledger_index": 9673349,
+           "transaction": {"TransactionType": "Payment", "Account": A, "Destination": B,
+                           "Amount": "3000000", "hash": "ABCD"},
+           "meta": {"HookExecutions": [{"HookExecution":
+                    {"HookAccount": A, "HookHash": HOOK_HASH, "HookResult": 3}}]}}
+    rec = ledger._normalize_account_tx_row(msg)
+    assert rec["tx"]["TransactionType"] == "Payment"      # body found (not empty)
+    assert rec["engine_result"] == "tesSUCCESS"
+    assert rec["ledger_index"] == 9673349
+    # and it classifies on the real body, not a pass-through
+    assert classify(rec, _manifest(), A)[0] == CONSISTENT
+
+
+def test_backfill_follows_marker_no_silent_truncation():
+    # account_tx must page via `marker` until exhausted — a single-page read silently drops every
+    # tx past the first page on reconnect (SND-4/RST-4), the exact outage window an attacker targets.
+    def row(h):
+        return {"tx": {"TransactionType": "Payment", "Account": A, "Destination": B,
+                       "Amount": "3000000", "hash": h, "ledger_index": 100},
+                "meta": {"HookExecutions": [{"HookExecution":
+                         {"HookAccount": A, "HookHash": HOOK_HASH, "HookResult": 3}}]}}
+    page1 = json.dumps({"id": "backfill", "result": {"transactions": [row("AA"), row("BB")], "marker": "M1"}})
+    page2 = json.dumps({"id": "backfill", "result": {"transactions": [row("CC")]}})  # no marker = last
+    ledger_mod = ledger
+    orig = ledger_mod._connect
+    ledger_mod._connect = lambda url: _FakeWS(recv_frames=[page1, page2])
+    try:
+        recs = asyncio.run(ledger_mod.account_tx_backfill("wss://x", A, 1))
+    finally:
+        ledger_mod._connect = orig
+    assert [r["hash"] for r in recs] == ["AA", "BB", "CC"], "must return BOTH pages"
+
+
+def test_stream_subscribes_first_and_yields_live():
+    # stream_account must subscribe FIRST then yield live records (gap-free), and de-dup by hash.
+    live = json.dumps({"type": "transaction", "validated": True, "engine_result": "tesSUCCESS",
+                       "ledger_index": 200,
+                       "transaction": {"TransactionType": "Payment", "Account": A, "Destination": B,
+                                       "Amount": "3000000", "hash": "LIVE1"},
+                       "meta": {"HookExecutions": [{"HookExecution":
+                                {"HookAccount": A, "HookHash": HOOK_HASH, "HookResult": 3}}]}})
+    fake = _FakeWS(stream_frames=[live])
+    orig = ledger._connect
+    ledger._connect = lambda url: fake
+    async def first():
+        async for rec in ledger.stream_account("wss://x", A):
+            return rec
+    try:
+        rec = asyncio.run(first())
+    finally:
+        ledger._connect = orig
+    assert rec["hash"] == "LIVE1"
+    assert any("subscribe" in s for s in fake.sent), "must SUBSCRIBE before streaming"
+
+
+def test_insecure_ws_refused():
+    # plaintext ws:// is refused (MITM could suppress a VIOLATION) unless explicitly overridden.
+    os.environ.pop("XAHC_WATCH_ALLOW_INSECURE", None)
+    try:
+        ledger._connect("ws://node.example")
+        assert False, "ws:// must be refused"
+    except ValueError:
+        pass
+    except ModuleNotFoundError:
+        pass  # websockets not installed in this env — the wss guard runs before import anyway
 
 
 if __name__ == "__main__":

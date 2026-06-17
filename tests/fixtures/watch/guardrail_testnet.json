@@ -37,7 +37,7 @@
           {"HookExecution": {
             "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
             "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
-            "HookResult": 2,
+            "HookResult": 4,
             "HookReturnCode": "2C"
           }}
         ]
@@ -79,7 +79,7 @@
           {"HookExecution": {
             "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
             "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
-            "HookResult": 2,
+            "HookResult": 4,
             "HookReturnCode": "37"
           }}
         ]

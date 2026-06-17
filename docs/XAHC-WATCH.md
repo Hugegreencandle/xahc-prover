@@ -22,13 +22,22 @@ Every observed transaction the watched hook executed on lands in **exactly one**
 
 | bucket | meaning | severity |
 |---|---|---|
-| **CONSISTENT** | the chain's accept/reject matches the proven predicate's expectation | quiet |
-| **VIOLATION** | the hook **ACCEPTED** a tx the proof says it must **REJECT** | 🚨 critical, exit ≠ 0 |
-| **PROOF_VOID** | the deployed `HookHash` ≠ the proven `HookHash` — the running code is not the proven code (a `SetHook` swap) | 🚨 critical, exit ≠ 0 |
-| **UNVERIFIED** | out of the proof's model: an IOU/undecodable amount, a non-clean engine result, or the hook was *more* restrictive than the model predicted | ⚠️ loud — never "consistent" |
+| **CONSISTENT** | the watched hook's own decision matches the proven predicate's expectation | quiet |
+| **VIOLATION** | the watched hook **ACCEPTED** a tx the proof says it must **REJECT** | 🚨 critical, exit ≠ 0 |
+| **PROOF_VOID** | the deployed `HookHash` ≠ the proven `HookHash` (a `SetHook` swap), **or** the bound account sent an in-scope payment and the proven hook did not run at all (removed/disabled) | 🚨 critical, exit ≠ 0 |
+| **UNVERIFIED** | out of the proof's model: an IOU/undecodable amount, an undecodable tx body, an error/GUARD_VIOLATION hook exit, or the hook was *more* restrictive than the model predicted | ⚠️ loud — never "consistent" |
 
 There is no implicit "ok". `UNVERIFIED` is watch's `INCONCLUSIVE`: loud, counted, never swallowed.
 This mirrors the engine's rule — **SOUNDNESS IS THE PRODUCT** — on the runtime side.
+
+**The decision is the *watched hook's own* `HookResult`, not the transaction's `engine_result`.**
+A Payment runs several hooks (the sender's guardrail *and*, e.g., a Strong-TSH destination), and a
+tx can also fail at apply-time for non-hook reasons. So the aggregate tx outcome is **not** this
+hook's decision. The watcher reads the watched execution's `HookResult` (3 = accept, 0/4 = rollback;
+`HookReturnCode` top bit = GUARD_VIOLATION → error), chain-validated per xahau-mcp's fidelity model.
+A hook **accept** of a should-reject tx is a `VIOLATION` **regardless** of whether a downstream
+actor or an apply-time `tec` happened to roll the transaction back; `engine_result` is used only as
+a corroborating note.
 
 ## The no-fork rule
 
@@ -82,9 +91,13 @@ python -m watch g.proof.json --replay tests/fixtures/watch/guardrail_testnet.jso
 python -m watch g.proof.json --ws wss://xahau-test.net --account rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed
 ```
 
-The live path reconnects with `account_tx` **gap-backfill** from the last-seen ledger, so a dropped
-websocket never produces a silent transaction gap. Exit is non-zero on the first `VIOLATION` /
-`PROOF_VOID`.
+The live path **subscribes first, then backfills** the gap from the last-seen ledger via
+`account_tx` — following the `marker` across **all** pages and de-duplicating by tx hash — so a
+dropped websocket produces neither a silent gap nor a double-count. A failed backfill is surfaced
+loudly and retried (never treated as "caught up"). `wss://` is required (a plaintext feed can be
+MITM'd to suppress a VIOLATION; override with `XAHC_WATCH_ALLOW_INSECURE=1`). A malformed/crafted tx
+can never crash the watcher — it fails closed to a loud `UNVERIFIED`. Exit is non-zero on the first
+`VIOLATION` / `PROOF_VOID`.
 
 ## Validation — replayed against the real ledger
 
@@ -104,3 +117,16 @@ One invariant end-to-end: `agent_guardrail` (spend-limit + dst-lock), the only h
 validated on live testnet. Other invariants reuse the same manifest + watch skeleton. Not yet in
 v1: stateful slot-health (reading state slots to re-check inductive base cases) and automated
 remediation — watch observes and alerts, it does not transact.
+
+## Hardening — enterprise audit (2026-06-17)
+
+A 5-dimension multi-agent audit (soundness/security/correctness/resilience/tests, each finding
+adversarially verified) hardened the live path. Fixed: the classifier now reads the **watched
+hook's own `HookResult`** instead of the aggregate `engine_result` (closing silent missed
+VIOLATIONs when a multi-hook tx or apply-time `tec` rolled the tx back); an in-scope payment with
+**no** execution of the proven hook → `PROOF_VOID` (not a silent `SKIP`); live `subscribe` message
+bodies (`transaction` key) decode correctly and an undecodable body fails closed to `UNVERIFIED`;
+backfill follows the `account_tx` `marker` across all pages (no silent truncation); `wss://`
+enforced; inbound frames bounded; and crafted/malformed records fail closed instead of crashing the
+monitor. The live transport now has direct offline tests (normalize / backfill-pagination /
+subscribe-first). Report: `HQ/06-Technical/Audit_xahc-watch_2026-06-17.md`.

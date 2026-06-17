@@ -52,9 +52,28 @@ def _params_for_predicate(m: ProofManifest) -> dict:
 def classify(record: dict, manifest: ProofManifest, hook_account: Optional[str]) -> tuple[str, str]:
     """Classify one transaction record into a bucket. `hook_account` is the bound r-address
     (manifest.hook_account or --account); used to pick the watched hook's execution + as the
-    predicate's hook_account scope. Returns (bucket, human detail)."""
+    predicate's hook_account scope. Returns (bucket, human detail).
+
+    The accept/reject decision comes from the WATCHED hook's OWN HookResult (via
+    ledger.hook_decision), NOT the aggregate tx engine_result — a Payment runs several hooks and
+    can fail at apply-time for non-hook reasons, so the tx outcome is not this hook's decision.
+    engine_result is used only as a corroborating note."""
+    hook_acct_id = ledger.account_id(hook_account) if hook_account else None
+    fields = ledger.tx_fields(record, hook_acct_id)
     ex = ledger.watched_execution(record, manifest.hook_hash, hook_account)
+
+    # The bound account sending an OUTGOING Payment is "in scope" — the guardrail MUST run on it.
+    in_scope = (hook_acct_id is not None and fields["tx_type"] == 0
+                and fields["account"] == hook_acct_id and fields["_has_tx_body"])
+
     if ex is None:
+        # No execution row for our hook. If the bound account sent an in-scope payment, the proven
+        # hook DID NOT RUN (removed / SetHook-deleted / disabled) — the proof no longer governs it.
+        # That is PROOF_VOID, never the quiet SKIP that hides a now-unguarded account.
+        if in_scope:
+            return PROOF_VOID, ("bound account sent an in-scope outgoing Payment but the proven "
+                                "hook did NOT execute (removed / SetHook-deleted / disabled) — the "
+                                "proof no longer governs this account")
         return SKIP, "watched hook did not execute on this tx"
 
     # 1) BINDING — the running code must be the proven code, else the proof does not apply.
@@ -63,44 +82,74 @@ def classify(record: dict, manifest: ProofManifest, hook_account: Optional[str])
                             f"{manifest.hook_hash[:8]}… — running code is not the proven code "
                             "(SetHook swap?); proof no longer applies")
 
-    # 2) ATTESTATION — the chain's decision vs the proven predicate's expectation.
     if hook_account is None:
         return UNVERIFIED, "no bound hook account to scope the predicate"
-    hook_acct_id = ledger.account_id(hook_account)
-    fields = ledger.tx_fields(record, hook_acct_id)
-    predicted = guardrail_expected(fields, _params_for_predicate(manifest))
+    if not fields["_has_tx_body"]:
+        return UNVERIFIED, "transaction body missing / undecodable — cannot evaluate the predicate"
+    if fields["_decode_error"]:
+        return UNVERIFIED, "a transaction address failed to decode — cannot evaluate the predicate"
 
+    # 2) ATTESTATION — the watched hook's OWN decision vs the proven predicate's expectation.
+    predicted = guardrail_expected(fields, _params_for_predicate(manifest))
+    decision = ledger.hook_decision(ex)          # ACCEPT / REJECT / OTHER, from HookResult
     res = ledger.engine_result(record)
-    if res == "tesSUCCESS":
-        observed = "ACCEPT"
-    elif res == "tecHOOK_REJECTED":
-        observed = "REJECT"
-    else:
-        observed = "OTHER"
+    note = "" if res in ("tesSUCCESS", "tecHOOK_REJECTED") else f" [tx engine_result={res}, non-hook]"
 
     if predicted == P_UNVERIFIED:
-        return UNVERIFIED, f"out of model (predicate UNVERIFIED); engine_result={res}"
-    if observed == "OTHER":
-        return UNVERIFIED, f"engine_result={res} is not a clean hook accept/reject"
-    if predicted == SHOULD_REJECT and observed == "ACCEPT":
-        return VIOLATION, ("proof requires REJECT but the hook ACCEPTED this tx "
-                           f"(engine_result={res})")
-    if predicted == SHOULD_REJECT and observed == "REJECT":
-        return CONSISTENT, "proof requires REJECT; chain rejected"
-    if predicted == ACCEPT_OK and observed == "ACCEPT":
-        return CONSISTENT, "proof allows ACCEPT; chain accepted"
-    # predicted ACCEPT_OK but the chain REJECTED — safe (more restrictive) but unexplained by
-    # the modeled invariant (guard? another policy?). Loud, not consistent. Never a VIOLATION.
-    return UNVERIFIED, ("chain rejected a tx the modeled invariant would allow — restriction "
-                        f"outside this invariant (engine_result={res})")
+        return UNVERIFIED, f"out of model (predicate UNVERIFIED); hook decision={decision}"
+    if decision == "OTHER":
+        return UNVERIFIED, ("hook exit was error / GUARD_VIOLATION / unknown "
+                            f"(HookResult={ex.get('hook_result')}) — cannot attest")
+    if predicted == SHOULD_REJECT and decision == "ACCEPT":
+        return VIOLATION, ("the proof requires REJECT but the hook ACCEPTED this tx "
+                           "(HookResult=accept)" + note)
+    if predicted == SHOULD_REJECT and decision == "REJECT":
+        return CONSISTENT, "proof requires REJECT; hook rolled back"
+    if predicted == ACCEPT_OK and decision == "ACCEPT":
+        return CONSISTENT, "proof allows ACCEPT; hook accepted"
+    # predicted ACCEPT_OK but the hook REJECTED — safe (more restrictive) but unexplained by the
+    # modeled invariant (guard / period-budget state / another policy). Loud, never a VIOLATION.
+    return UNVERIFIED, ("hook rejected a tx the modeled invariant would allow — restriction "
+                        "outside this invariant")
 
 
 def _emit(bucket: str, detail: str, record: dict) -> None:
     icon = {CONSISTENT: "✅", VIOLATION: "🚨", PROOF_VOID: "🚨", UNVERIFIED: "⚠️", SKIP: "·"}[bucket]
-    h = record.get("hash", "?")
+    h = record.get("hash", "?") if isinstance(record, dict) else "?"
     if bucket == SKIP:
         return  # quiet — irrelevant tx
     print(f"{icon} {bucket:<10} {h}  {detail}")
+
+
+def _safe_classify(record, manifest, account) -> tuple[str, str]:
+    """classify() wrapped so a crafted/malformed tx can NEVER crash the watcher — a monitor that
+    goes dark is itself a silent 'all good'. Any error fails closed to a loud UNVERIFIED."""
+    try:
+        return classify(record, manifest, account)
+    except Exception as e:  # noqa: BLE001 — fail closed, never crash the monitor
+        return UNVERIFIED, f"classification error (failed closed): {e!r}"
+
+
+def _preflight(m: ProofManifest, acct: Optional[str]) -> Optional[int]:
+    """Validate the manifest + bound account before watching. Returns an exit code to abort, or
+    None to proceed."""
+    from watch.manifest import MANIFEST_VERSION
+    if not m.is_proven():
+        print(f"ERROR: manifest verdict is not PROVEN (exit_code={m.exit_code}); refusing to bind "
+              "to a non-proof.")
+        return 1
+    if m.manifest_version != MANIFEST_VERSION:
+        print(f"⚠️  manifest_version {m.manifest_version} != supported {MANIFEST_VERSION} — the "
+              "schema may have changed; results may be unreliable.")
+    if not acct:
+        print("ERROR: no account to watch (set manifest.hook_account or pass --account).")
+        return 1
+    try:
+        ledger.account_id(acct)
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR: bound account {acct!r} is not a valid r-address: {e!r}")
+        return 1
+    return None
 
 
 def replay(manifest_path: str, fixture_path: str, account: Optional[str] = None) -> int:
@@ -108,6 +157,9 @@ def replay(manifest_path: str, fixture_path: str, account: Optional[str] = None)
     (VIOLATION / PROOF_VOID) appeared, or a rising UNVERIFIED count merits attention (reported)."""
     m = load_manifest(manifest_path)
     acct = account or m.hook_account
+    rc = _preflight(m, acct)
+    if rc is not None:
+        return rc
     with open(fixture_path) as f:
         fixture = json.load(f)
     records = fixture["transactions"] if isinstance(fixture, dict) else fixture
@@ -116,7 +168,7 @@ def replay(manifest_path: str, fixture_path: str, account: Optional[str] = None)
     print(f"replay: {len(records)} tx vs proof {m.invariant} "
           f"(HookHash {m.hook_hash[:8]}…{m.hook_hash[-8:]}) account={acct}")
     for rec in records:
-        bucket, detail = classify(rec, m, acct)
+        bucket, detail = _safe_classify(rec, m, acct)
         tally[bucket] += 1
         _emit(bucket, detail, rec)
 
@@ -138,12 +190,12 @@ async def run_live(manifest_path: str, ws_url: str, account: Optional[str] = Non
     first CRITICAL finding (VIOLATION / PROOF_VOID). CONSISTENT is quiet; UNVERIFIED is logged."""
     m = load_manifest(manifest_path)
     acct = account or m.hook_account
-    if not acct:
-        print("ERROR: no account to watch (set manifest.hook_account or pass --account).")
-        return 1
+    rc = _preflight(m, acct)
+    if rc is not None:
+        return rc
     print(f"watching {acct} vs proof {m.invariant} (HookHash {m.hook_hash[:8]}…) on {ws_url}")
     async for rec in ledger.stream_account(ws_url, acct):
-        bucket, detail = classify(rec, m, acct)
+        bucket, detail = _safe_classify(rec, m, acct)
         _emit(bucket, detail, rec)
         if bucket in CRITICAL:
             print(f"\n🚨 {bucket} — halting watch (exit 2).")
