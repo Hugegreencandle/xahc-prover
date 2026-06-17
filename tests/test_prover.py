@@ -20,6 +20,7 @@ import prove_period_budget                                                 # noq
 import prove_reentrancy                                                     # noqa: E402
 import prove_unchecked_return                                               # noqa: E402
 import prove_validate_range                                                 # noqa: E402
+import prove_bootloader                                                     # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -196,6 +197,11 @@ def test_matrix_verdicts():
     assert prove_validate_range.main(os.path.join(H, "validate_range_ok.wasm")) == 0
     assert prove_validate_range.main(os.path.join(H, "validate_range_bug.wasm")) == 2
     assert prove_validate_range.main(os.path.join(H, "limit.wasm")) == 1
+    # BOOTLOADER verify-core (SC-style): accept ⟹ candidate hash == pinned hash (32B).
+    #   verify(ref) -> PROVEN (0); prefix-bug (4 of 32 bytes) + skip-bug (no check) -> CEX (2)
+    assert prove_bootloader.main(os.path.join(H, "bootloader_verify.wasm")) == 0
+    assert prove_bootloader.main(os.path.join(H, "bootloader_prefix_bug.wasm")) == 2
+    assert prove_bootloader.main(os.path.join(H, "bootloader_skip_bug.wasm")) == 2
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
