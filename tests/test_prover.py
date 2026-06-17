@@ -180,6 +180,10 @@ def test_matrix_verdicts():
     assert prove_reentrancy.main(os.path.join(H, "reentrancy_safe.wasm")) == 0
     assert prove_reentrancy.main(os.path.join(H, "reentrancy_deferred_bug.wasm")) == 2
     assert prove_reentrancy.main(os.path.join(H, "reentrancy_refund_bug.wasm")) == 2
+    # audit REENTRANCY-01 (was a false-PROVEN): passes cap/floor/cover but persists a malformed
+    # reserved' > spent' -> a release-only cbak wipes spend to 0 and cumulative outflow exceeds LIM.
+    # The well-formedness obligation (spent' >= reserved') closes the induction -> COUNTEREXAMPLE.
+    assert prove_reentrancy.main(os.path.join(H, "reentrancy_reserved_gt_spent_bug.wasm")) == 2
     # N/A (exit 1): no cbak surface, or the period-budget contract (PLM/PER) — not this driver.
     assert prove_reentrancy.main(os.path.join(H, "limit.wasm")) == 1
     assert prove_reentrancy.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 1
