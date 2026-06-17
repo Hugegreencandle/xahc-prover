@@ -43,13 +43,14 @@ reaches `accept` can violate the invariant.
 
 ## The trifecta — safe Hooks, end to end
 
-Three open-source tools, one workflow: **write → simulate one tx → prove all inputs.**
+Four open-source tools, one workflow: **write → simulate one tx → prove all inputs → watch live.**
 
 | stage | tool | what it does |
 |---|---|---|
 | **write** | [xahc](https://github.com/Hugegreencandle/xahc) | author + compile a safe Hook to clean, lint-passed WASM |
 | **simulate one** | [xahau-mcp](https://github.com/Hugegreencandle/xahau-mcp) | run the real bytecode against one live transaction |
 | **prove all** | [xahc-prover](https://github.com/Hugegreencandle/xahc-prover) | prove an invariant holds for every input in scope — or return the counterexample |
+| **watch live** | [xahc-watch](docs/XAHC-WATCH.md) *(in this repo, `src/watch/`)* | bind a proof to a deployed hook and continuously attest the binding holds + live txns obey the proven verdict |
 
 📋 **[OWASP Smart Contract Top 10 (2025) coverage →](docs/SC-TOP-10-COVERAGE.md)** — which of
 the SC Top 10 xahc-prover proves, mapped to invariants, with honest out-of-domain notes.

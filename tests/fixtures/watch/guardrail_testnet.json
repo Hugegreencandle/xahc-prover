@@ -1,0 +1,89 @@
+{
+  "_note": "Real Xahau testnet (NetworkID 21338) result txns for the agent_guardrail hook on account A (rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed), from docs/TESTNET-PROOF.md (run 2026-06-14). These are the 4 of the 6 result txns that executed THIS hook on THIS account (cases 1a/1b/2a/2b); cases 3a/3b are termination_bug on account E (a different HookHash) and are out of this watcher's binding. tx hashes / engine_result / HookReturnCode / ledger are exactly as recorded on-chain. Amounts: 1a=3 XAH and 1b=10 XAH are stated in the doc; for 2a/2b the doc states only the destination, so the (under-limit) amount is set to 3 XAH — the dst-lock, not the amount, is what those two cases exercise. HookHash 531BD1D7...675BB20C = SHA-512Half(agent_guardrail.wasm). LIM=5 XAH, DST=B.",
+  "transactions": [
+    {
+      "hash": "64D035B6CD3D0C668622641C4E0A8519FDD7E06A7D83968238127DC716F3D7ED",
+      "ledger_index": 9673349,
+      "engine_result": "tesSUCCESS",
+      "tx": {
+        "TransactionType": "Payment",
+        "Account": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+        "Destination": "rGkfQn5bxTqKnKAJ3pc5NX4GRHEgeuDdbG",
+        "Amount": "3000000"
+      },
+      "meta": {
+        "HookExecutions": [
+          {"HookExecution": {
+            "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+            "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
+            "HookResult": 3,
+            "HookReturnCode": "3A"
+          }}
+        ]
+      }
+    },
+    {
+      "hash": "8AA5CB5C50F1CF76658CB836EA2ECA4ABCD56B3FE79BB31EE26AC5922BA4DA88",
+      "ledger_index": 9673352,
+      "engine_result": "tecHOOK_REJECTED",
+      "tx": {
+        "TransactionType": "Payment",
+        "Account": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+        "Destination": "rGkfQn5bxTqKnKAJ3pc5NX4GRHEgeuDdbG",
+        "Amount": "10000000"
+      },
+      "meta": {
+        "HookExecutions": [
+          {"HookExecution": {
+            "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+            "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
+            "HookResult": 2,
+            "HookReturnCode": "2C"
+          }}
+        ]
+      }
+    },
+    {
+      "hash": "141017F1F0E907B7D7510B673FFFBF9D3F4BFE58EFC93A94DE9644D9A12DAC95",
+      "ledger_index": 9673354,
+      "engine_result": "tesSUCCESS",
+      "tx": {
+        "TransactionType": "Payment",
+        "Account": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+        "Destination": "rGkfQn5bxTqKnKAJ3pc5NX4GRHEgeuDdbG",
+        "Amount": "3000000"
+      },
+      "meta": {
+        "HookExecutions": [
+          {"HookExecution": {
+            "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+            "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
+            "HookResult": 3,
+            "HookReturnCode": "3A"
+          }}
+        ]
+      }
+    },
+    {
+      "hash": "425DE99C9264C4C49D0B517B6F8FCDE5BAC91C1F7838D52D5B7D715746165001",
+      "ledger_index": 9673357,
+      "engine_result": "tecHOOK_REJECTED",
+      "tx": {
+        "TransactionType": "Payment",
+        "Account": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+        "Destination": "rfWNuoWaFuNNz7BsnX6fgb1cubLpbgXiqy",
+        "Amount": "3000000"
+      },
+      "meta": {
+        "HookExecutions": [
+          {"HookExecution": {
+            "HookAccount": "rH2RdFKtADfeQf6W7zXrZ7J7hsszaG76Ed",
+            "HookHash": "531BD1D72857E9089F8F1C06B1F43E68109BDEB957F952C5348F8A6E675BB20C",
+            "HookResult": 2,
+            "HookReturnCode": "37"
+          }}
+        ]
+      }
+    }
+  ]
+}

@@ -12,6 +12,7 @@ Usage: python prove_guardrail.py <agent_guardrail.wasm> [max_drops]
 import sys
 import z3
 from prover import Engine
+from watch.predicates import decode_drops, over_limit, dest_not_allowed, Z3Ops
 
 
 def main(path: str, max_drops: int | None = None) -> int:
@@ -27,8 +28,9 @@ def main(path: str, max_drops: int | None = None) -> int:
         print("ERROR: hook does not look like agent_guardrail (needs otxn_type, sfAccount, hook_account, sfAmount, LIM)")
         return 1
 
-    # the guardrail's amount decode masks byte0 with 0x3F (strips not-XRP/sign bits)
-    drops = z3.Concat(amt[0] & 0x3F, *amt[1:])
+    # the guardrail's amount decode masks byte0 with 0x3F (strips not-XRP/sign bits).
+    # SHARED with the watcher via watch.predicates — same rule, two evaluators (no fork).
+    drops = decode_drops(amt, Z3Ops)
     limit = z3.Concat(*lim)
     is_payment = tt == 0
     is_outgoing = z3.And(*[origin[i] == me[i] for i in range(20)])
@@ -43,7 +45,7 @@ def main(path: str, max_drops: int | None = None) -> int:
         s = z3.Solver()
         s.add(*cons)
         s.add(is_payment, is_outgoing)          # scope: an OUTGOING PAYMENT
-        s.add(z3.UGT(drops, limit))             # ...that the hook still accepted over-limit
+        s.add(over_limit(drops, limit, Z3Ops))  # ...that the hook still accepted over-limit (shared rule)
         if max_drops is not None:
             s.add(z3.ULE(drops, z3.BitVecVal(max_drops, 64)))
         r = s.check()
@@ -71,7 +73,7 @@ def main(path: str, max_drops: int | None = None) -> int:
     allowed = e.inputs.get("param:DST")
     dst_ret = e.inputs.get("hook_param_ret:DST")
     if dest and allowed and dst_ret is not None:
-        dest_mismatch = z3.Or(*[dest[i] != allowed[i] for i in range(20)])
+        dest_mismatch = dest_not_allowed(dest, allowed, Z3Ops)   # shared rule (no fork)
         for code, cons in e.accepts:
             s = z3.Solver()
             s.add(*cons)
@@ -111,5 +113,50 @@ def main(path: str, max_drops: int | None = None) -> int:
 
 
 if __name__ == "__main__":
-    md = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    sys.exit(main(sys.argv[1], md))
+    # Positional: <hook.wasm> [max_drops].  Optional flags (do NOT change main()'s signature,
+    # which the test suite calls directly):
+    #   --emit-manifest <path>   write a proof manifest (only on a PROVEN exit; fail-closed)
+    #   --lim <drops>            deployment per-tx cap to record in the manifest params
+    #   --dst <40-hex>           deployment destination allowlist (20-byte account-id, hex)
+    argv = sys.argv[1:]
+    emit_path = lim_param = dst_param = None
+    positional = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--emit-manifest":
+            emit_path = argv[i + 1]; i += 2
+        elif a == "--lim":
+            lim_param = int(argv[i + 1]); i += 2
+        elif a == "--dst":
+            dst_param = argv[i + 1]; i += 2
+        else:
+            positional.append(a); i += 1
+    hook_path = positional[0]
+    md = int(positional[1]) if len(positional) > 1 else None
+
+    code = main(hook_path, md)
+
+    if emit_path is not None:
+        # FAIL CLOSED: only a PROVEN run emits a manifest. write_manifest itself also refuses.
+        if code != 0:
+            print(f"\n(not emitting manifest: prover exit {code} is not PROVEN)")
+            sys.exit(code)
+        from watch.manifest import build_manifest, write_manifest
+        params = {}
+        if lim_param is not None:
+            params["LIM"] = lim_param
+        if dst_param is not None:
+            params["DST"] = dst_param.upper()
+        m = build_manifest(
+            wasm=open(hook_path, "rb").read(),
+            invariant="guardrail",
+            verdict="PROVEN [spend-limit, dst-lock]",
+            exit_code=code,
+            params=params,
+            scope_caveats=["native XAH amounts only — IOU/issued amounts are out of model"],
+        )
+        write_manifest(m, emit_path)
+        print(f"\n📄 proof manifest written: {emit_path}  (HookHash {m.hook_hash[:8]}…{m.hook_hash[-8:]})")
+
+    sys.exit(code)
