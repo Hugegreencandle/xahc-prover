@@ -1,7 +1,9 @@
 #include "xahc/xahc.h"
-/* Bootloader verify-core (reference). Models the loader's go/no-go gate: ACCEPT (=> hand control
- * to stage-2) ONLY when the candidate bundle hash equals the pinned hash, all 32 bytes.
- * Params: PIN (32-byte pinned SHA-512Half), CAN (32-byte candidate hash the wallet computed). */
+/* Bootloader verify-core — a REFERENCE MODEL, not a deployed hook. Models the loader's go/no-go
+ * gate: ACCEPT (=> hand control to stage-2) ONLY when the candidate bundle hash equals the pinned
+ * hash, all 32 bytes. Params: PIN (32-byte pinned SHA-512Half), CAN (32-byte candidate hash the
+ * wallet computed). NOTE: Xahau's on-chain SetBoot stores the blob verbatim and verifies nothing —
+ * the pin/compare modeled here is a wallet-side convention, not protocol-enforced. */
 int64_t hook(uint32_t r){
     XAHC_HOOK_ENTRY();
     uint8_t pk[3]={'P','I','N'}, ck[3]={'C','A','N'};

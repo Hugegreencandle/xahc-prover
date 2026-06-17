@@ -202,6 +202,11 @@ def test_matrix_verdicts():
     assert prove_bootloader.main(os.path.join(H, "bootloader_verify.wasm")) == 0
     assert prove_bootloader.main(os.path.join(H, "bootloader_prefix_bug.wasm")) == 2
     assert prove_bootloader.main(os.path.join(H, "bootloader_skip_bug.wasm")) == 2
+    # off-by-one SOUNDNESS control: compares bytes 0..30, ignores byte 31 -> CEX *at byte 31*.
+    # If the driver's negation looped range(31) not range(32) this would falsely PROVE.
+    assert prove_bootloader.main(os.path.join(H, "bootloader_off31_bug.wasm")) == 2
+    # absent-pin control: a loader that never pins a hash must NOT be certified -> N/A (1), never 0.
+    assert prove_bootloader.main(os.path.join(H, "bootloader_nopin_bug.wasm")) == 1
 
 
 # --- ADVERSARIAL soundness sweep (launch-headline invariants) -------------------
