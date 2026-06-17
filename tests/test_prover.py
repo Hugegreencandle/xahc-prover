@@ -20,6 +20,7 @@ import prove_period_budget                                                 # noq
 import prove_reentrancy                                                     # noqa: E402
 import prove_unchecked_return                                               # noqa: E402
 import prove_validate_range                                                 # noqa: E402
+import prove_resource_conservation                                          # noqa: E402
 import prove_bootloader                                                     # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -187,6 +188,13 @@ def test_matrix_verdicts():
     # N/A (exit 1): no cbak surface, or the period-budget contract (PLM/PER) — not this driver.
     assert prove_reentrancy.main(os.path.join(H, "limit.wasm")) == 1
     assert prove_reentrancy.main(os.path.join(H, "agent_guardrail_stateful.wasm")) == 1
+    # IN-WORLD RESOURCE CONSERVATION (accept ⟹ resource' <= resource_old + MINT; no mint-from-nothing):
+    #   conserve   -> spends, persists smaller value            -> PROVEN (0)
+    #   inflate    -> res' = res + amount, no MINT param         -> COUNTEREXAMPLE (2)
+    #   mint_capped-> mints but amount<=MINT (within allowance)  -> PROVEN (0, no spurious CEX)
+    assert prove_resource_conservation.main(os.path.join(H, "resource_conserve.wasm")) == 0
+    assert prove_resource_conservation.main(os.path.join(H, "resource_inflate_bug.wasm")) == 2
+    assert prove_resource_conservation.main(os.path.join(H, "resource_mint_capped.wasm")) == 0
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
