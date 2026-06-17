@@ -144,6 +144,28 @@ def _check_entry(label, e, lim):
             print(f"   persisted spent'={ev(new_spent)} > LIM")
             return 2
 
+        # (well-formed) spent' >= reserved'  — CLOSES THE INDUCTION. The hypothesis assumes the
+        # prior is well-formed (reserved_old <= spent_old, line `hyp`); for the inductive step to
+        # be sound, every path must RE-ESTABLISH that on the persisted state, else a reachable
+        # post-state with reserved' > spent' is excluded from the next step's hypothesis AND from
+        # cbak's prior — and a release-only cbak (spent' = spent - reserved, clamped >=0) then
+        # wipes spend to 0, letting cumulative outflow exceed LIM across emit->cbak. Without this
+        # check the PROVEN does NOT bound cumulative spend (audit REENTRANCY-01, false-PROVEN).
+        s = z3.Solver(); s.set("timeout", 120000)
+        s.add(*cons); s.add(hyp)
+        s.add(z3.UGT(z128(new_reserved), z128(new_spent)))   # persists reserved' > spent'
+        r = s.check()
+        if r == z3.unknown:
+            print(f"\n⚠️ INCONCLUSIVE [{label}/well-formed] — solver `unknown`; not PROVEN.")
+            return 3
+        if r == z3.sat:
+            m = s.model(); ev = lambda b: m.eval(b, model_completion=True).as_long()
+            print(f"\n❌ COUNTEREXAMPLE [{label}/unclosed-induction] — persists a malformed state "
+                  "(reserved' > spent') the proof's own hypothesis excludes:")
+            print(f"   persisted reserved'={ev(new_reserved)} > spent'={ev(new_spent)} -> a "
+                  "release-only cbak can then wipe spend to 0, so cumulative outflow can exceed LIM")
+            return 2
+
         # (floor) spent' >= spent - reserved  (cannot net-refund past the reservation)
         s = z3.Solver(); s.set("timeout", 120000)
         s.add(*cons); s.add(hyp)
