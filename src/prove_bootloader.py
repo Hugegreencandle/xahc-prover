@@ -1,22 +1,26 @@
-"""Prove the BOOTLOADER verify-core invariant — "loads only verified bytes".
+"""Prove a REFERENCE-MODEL bootloader gate — "accept only on a matching hash".
 
   for all inputs:  accept  =>  candidate_hash == pinned_hash   (all 32 bytes)
 
-THE POINT (the layer-1-UI / PWA boot-blob story, Xahau discussion #759). An on-chain bootloader is
-the root of trust for a Hook's UI: it fetches a larger stage-2 app from anywhere and must run it
-ONLY if the bytes hash to the pinned value. The loader's go/no-go decision is a small, bounded gate
-— exactly the shape this engine proves. We model that gate as an accept-decision over two 32-byte
-inputs:
+CONTEXT (the layer-1-UI / PWA boot-blob story, Xahau discussion #759). A bootloader is meant to be
+the root of trust for a Hook's UI: fetch a larger stage-2 app, run it ONLY if the bytes hash to a
+pinned value. The go/no-go decision is a small, bounded gate — exactly the shape this engine proves.
+We model that gate (`bootloader_verify.c` is a REFERENCE MODEL, not a deployed hook) as an
+accept-decision over two 32-byte inputs:
   PIN — the pinned SHA-512Half the policy fixes,
   CAN — the candidate hash the wallet computed over the fetched stage-2 bytes,
-and prove the gate ACCEPTS (hands control to stage-2) ONLY when all 32 bytes match. A loader that
-satisfies this cannot be tricked into executing unverified code:
-  prove(Hook) + prove(bootloader)  =  the whole app's trust base is formally verified, UI included.
+and prove the gate ACCEPTS (hands control to stage-2) ONLY when all 32 bytes match.
 
-SCOPE (honest): we prove the verify GATE's accept condition over the candidate/pinned hashes. The
-actual SHA-512Half of the fetched bundle is computed wallet-side and fed in as CAN; this proof
-guarantees the gate's go/no-go is sound (never "go" on a hash != pin), not that the wallet hashes
-correctly. Same byte-exact-equality discipline as the guardrail's dst-lock (20 bytes), here 32.
+WHAT THIS PROVES — and the three things it does NOT (read before quoting this anywhere):
+This closes exactly ONE link — the gate's accept logic. It is the same byte-exact-equality
+discipline as the guardrail's dst-lock (20 bytes; there over a real testnet-validated hook, here
+over a reference model). EXPLICITLY out of model and TRUSTED:
+  1. The on-chain `SetBoot` transaction (xahaud) stores the blob VERBATIM and verifies NOTHING —
+     the pin/compare is a wallet-side convention, not protocol-enforced. The node does not hash.
+  2. The wallet's SHA-512Half over the fetched stage-2 bytes (fed in here as CAN) is trusted.
+  3. Stage-2 sandboxing / isolation after the gate accepts is out of model.
+So do NOT say "the whole app is proven" or "prove(Hook)+prove(bootloader) = the app verified": the
+proof covers the gate's accept condition, not the boot chain end to end.
 
 Fail-closed: solver `unknown` / unsupported opcode / hit unroll bound => INCONCLUSIVE, never PROVEN.
 
@@ -74,10 +78,12 @@ def main(path: str) -> int:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
         return 3
 
-    print("\n✅ PROVEN — for ALL inputs, the loader accepts (hands control to stage-2) ONLY when the "
-          "candidate hash equals the pinned hash, all 32 bytes. It cannot be tricked into running "
-          "unverified code. (SCOPE: proves the verify gate's accept condition; the wallet supplies "
-          "CAN = SHA-512Half(fetched bytes).)")
+    print("\n✅ PROVEN — for ALL inputs, the gate accepts (hands control to stage-2) ONLY when the "
+          "candidate hash equals the pinned hash, all 32 bytes. ASSUMING the wallet computes "
+          "CAN = SHA-512Half(fetched bytes) correctly and stage-2 is sandboxed — and noting the "
+          "on-chain SetBoot stores the blob verbatim and verifies nothing — the loader cannot hand "
+          "control to bytes whose hash != pin. (Proves the gate's accept logic, not the whole boot "
+          "chain; reference model, not a deployed hook.)")
     return 0
 
 
