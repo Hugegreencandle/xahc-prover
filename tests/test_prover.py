@@ -24,6 +24,7 @@ import prove_resource_conservation                                          # no
 import prove_bootloader                                                     # noqa: E402
 import prove_commitment                                                     # noqa: E402
 import prove_preview_faithfulness                                           # noqa: E402
+import prove_boot_upgrade                                                   # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -235,6 +236,13 @@ def test_matrix_verdicts():
     assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_dtag_bug.wasm")) == 3
     assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_flags_bug.wasm")) == 3
     assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_invoice_bug.wasm")) == 3
+    # BOOT-UPGRADE-AUTHZ: re-pin accept ⟹ origin==owner AND new_version > old_version (Richard).
+    #   ok -> PROVEN; no-authz (anyone re-pins) -> CEX; no monotonic check (downgrade/replay) -> CEX;
+    #   a hook that doesn't re-pin the boot slot -> N/A.
+    assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_ok.wasm")) == 0
+    assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_noauth_bug.wasm")) == 2
+    assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_downgrade_bug.wasm")) == 2
+    assert prove_boot_upgrade.main(os.path.join(H, "agent_guardrail.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
