@@ -26,6 +26,7 @@ import prove_commitment                                                     # no
 import prove_preview_faithfulness                                           # noqa: E402
 import prove_boot_upgrade                                                   # noqa: E402
 import prove_permissioned_transfer                                          # noqa: E402
+import prove_dst_lock                                                       # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -253,6 +254,11 @@ def test_matrix_verdicts():
     assert prove_permissioned_transfer.main(os.path.join(H, "permissioned_bug.wasm")) == 2
     assert prove_permissioned_transfer.main(os.path.join(H, "permissioned_prefix_bug.wasm")) == 2
     assert prove_permissioned_transfer.main(os.path.join(H, "authz.wasm")) == 1
+    # EMIT DST-LOCK (#26): accept ⟹ every EMITTED payment's destination == locked DST param.
+    #   emits only to DST -> PROVEN; emits to attacker (otxn dest) -> CEX; no DST/emit -> N/A.
+    assert prove_dst_lock.main(os.path.join(H, "dst_lock_ok.wasm")) == 0
+    assert prove_dst_lock.main(os.path.join(H, "dst_lock_bug.wasm")) == 2
+    assert prove_dst_lock.main(os.path.join(H, "authz.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
