@@ -57,7 +57,7 @@ class Terminal(Exception):
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
                  "writes_bytes",
-                 "emit_count", "emits", "emits_iou", "fees", "fsets",
+                 "emit_count", "emits", "emits_iou", "emit_obs", "fees", "fsets",
                  "reserve_n", "reserve_calls", "mutation_rets")
 
     def __init__(self):
@@ -76,6 +76,10 @@ class Path:
         self.emit_count: int = 0  # number of emit() calls on this path
         self.emits: list = []     # emitted native drops (BitVec64) or None if unparseable
         self.emits_iou: list = [] # emitted IOU value as (xfl_bv, cur, iss) or None per emit
+        # money-ROUTING fields of each emitted native Payment (for preview-faithfulness): a dict
+        # {amount, dest(20 bytes), dtag, stag} per emit, or None if the blob isn't the recognized
+        # native template (an unrecognized/IOU emit -> the consumer must FAIL CLOSED, never PROVEN).
+        self.emit_obs: list = []
         self.fees: list = []      # per-emit base fee (BitVec64) charged to the emitting acct
         self.fsets: list = []     # foreign-state-set events: (acct_bytes|None, granted:Bool, ret)
         # ---- #7 emission-burden (etxn_reserve count) ----
@@ -108,6 +112,7 @@ class Path:
         p.emit_count = self.emit_count
         p.emits = list(self.emits)
         p.emits_iou = list(self.emits_iou)
+        p.emit_obs = list(self.emit_obs)
         p.fees = list(self.fees)
         p.fsets = list(self.fsets)
         p.reserve_n = self.reserve_n
@@ -150,6 +155,7 @@ class Engine:
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
+        self.emit_obs_on_accept: list = []   # (cons, emit_obs, emit_count) per accepting path
         # ---- #7 emission-burden ----
         # Per accepting path: (cons, emit_count:int, reserve_n:BitVec64|None, reserve_calls:int).
         # reserve_n is the declared emit budget from the FIRST etxn_reserve(n) (None = the hook
@@ -663,6 +669,7 @@ class Engine:
             p.emit_count += 1
             p.emits.append(self._emit_drops(p, rptr))
             p.emits_iou.append(self._emit_iou_xfl(p, rptr))
+            p.emit_obs.append(self._emit_observable_native(p, rptr))
             # The emitting account also pays the emitted txn's base fee. We charge the SAME
             # SYMBOLIC value `etxn_fee_base` returns (>= host floor 10) — exactly the fee the
             # host deducts and the hook reads/pays. Because the fee ranges over [10, INF), the
@@ -867,6 +874,7 @@ class Engine:
                 self.accepts_full.append((code, list(p.cons), dict(p.writes)))
                 self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
                 self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
+                self.emit_obs_on_accept.append((list(p.cons), list(p.emit_obs), p.emit_count))
                 self.fees_on_accept.append((list(p.cons), list(p.fees), p.emit_count))
                 self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))
                 self.emission_on_accept.append(
@@ -955,6 +963,31 @@ class Engine:
         cur = [self.load_byte(p, rptr + 44 + i) for i in range(20)]
         iss = [self.load_byte(p, rptr + 64 + i) for i in range(20)]
         return (xflv, cur, iss)
+
+    def _emit_observable_native(self, p, rptr):
+        """Extract the money-ROUTING fields of an emitted NATIVE Payment built by the xahc payment
+        template (include/xahc/emit/payment.h) for preview-faithfulness: the recipient + tags whose
+        value the wallet previews. Returns {amount, dest(list[20 BitVec8]), dtag, stag} or None if
+        the blob isn't the recognized native template (an IOU/unrecognized emit -> the consumer
+        FAILS CLOSED, never PROVEN). Offsets (validated by concrete field-id markers): SourceTag
+        value 9..12, DestinationTag value 19..22, Amount 36..43, native Fee id 0x68@44, Destination
+        marker 0x83 0x14 @110..111, Destination value 112..131. The FLS/LLS fields (24..34) carry
+        ledger_seq BY DESIGN (tx validity bounds) and are intentionally NOT treated as a routing
+        field — they are not user-observable money direction."""
+        def cb(off):
+            b = self.load_byte(p, rptr + off)
+            return self._val(b) if self._is_concrete(b) else None
+        try:
+            # validate the native template by its concrete field-id markers
+            if cb(0) != 0x12 or cb(35) != 0x61 or cb(44) != 0x68 or cb(110) != 0x83 or cb(111) != 0x14:
+                return None
+        except RuntimeError:
+            return None
+        amt = z3.Concat(*[self.load_byte(p, rptr + 36 + i) for i in range(8)])
+        stag = z3.Concat(*[self.load_byte(p, rptr + 9 + i) for i in range(4)])
+        dtag = z3.Concat(*[self.load_byte(p, rptr + 19 + i) for i in range(4)])
+        dest = [self.load_byte(p, rptr + 112 + i) for i in range(20)]
+        return {"amount": amt, "dest": dest, "dtag": dtag, "stag": stag}
 
     # ---- the interpreter ----
     def run(self, entry=None):

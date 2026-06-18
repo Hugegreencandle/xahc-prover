@@ -25,10 +25,14 @@ Method (sound, reuses prove_time_nonce machinery):
   - DECISION: per accepting path constraint C, substitute every entropy symbol with a fresh primed
     copy (all non-entropy symbols shared). If C can hold yet the primed copy Cp fail for the same
     non-entropy input, the accept decision flips under entropy -> COUNTEREXAMPLE (exact query).
-  - EMITS + STATE WRITES: if any emitted value (native or IOU) or any persisted state write on an
-    accepting path syntactically DEPENDS on an entropy symbol (AST contains it), the previewed
-    effect can differ at execution -> COUNTEREXAMPLE. (Syntactic dependence is conservative toward
-    flagging = the safe direction; it never yields a false PROVEN.)
+  - EMITTED money-ROUTING fields: for each emitted native Payment, if its amount, DESTINATION,
+    destination-tag, or source-tag syntactically DEPENDS on an entropy symbol -> COUNTEREXAMPLE
+    (checking the recipient/tags, not just the amount, closes the money-misdirection hole). An emit
+    whose blob is NOT the recognized native template (IOU/custom) FAILS CLOSED -> INCONCLUSIVE (an
+    unmodeled emitted field can never yield a false PROVEN). FLS/LLS carry ledger_seq by design (tx
+    validity bounds) and are intentionally NOT treated as routing fields.
+  - STATE WRITES: if any persisted state write on an accepting path depends on an entropy symbol ->
+    COUNTEREXAMPLE. (Syntactic dependence is conservative toward flagging = safe; never a false PROVEN.)
   Fail closed: solver `unknown` / unsupported / hit-bound -> INCONCLUSIVE. No feasible accepting
   path -> N/A (vacuity_guard), never a vacuous PROVEN. A hook that reads no entropy and whose
   effects don't reference it is faithful -> PROVEN.
@@ -64,17 +68,6 @@ def _depends_on(expr, target_names: set) -> bool:
     return False
 
 
-def _emit_values(emit):
-    """Flatten an emit record into the z3 values it carries (native drops BitVec, or the IOU
-    (xfl, cur, iss) tuple). None entries (unparseable) are skipped — those are handled by
-    unsound_gate / the engine's own fail-closed paths."""
-    if emit is None:
-        return []
-    if isinstance(emit, tuple):
-        return [v for v in emit if v is not None]
-    return [emit]
-
-
 def main(path: str) -> int:
     e = Engine(open(path, "rb").read())
     e.run()
@@ -107,16 +100,27 @@ def main(path: str) -> int:
                       "on-ledger execution (e.g. a sequence/time deadline). Preview is not faithful.")
                 return 2
 
-    # (2) EMITTED-VALUE dependence — a previewed emit amount/dest that varies with entropy.
-    for cons, emits, _cnt in (e.emits_on_accept + e.iou_emits_on_accept):
+    # (2) EMITTED money-ROUTING dependence — a previewed emit's amount, DESTINATION, or TAGS that
+    # varies with entropy (the audit FP-1 caught that checking only Amount let an entropy-chosen
+    # Destination/tag slip through = money misdirection). We check the full routing set, and FAIL
+    # CLOSED on any emit whose blob the engine could not recognize (IOU/unknown template) so an
+    # unmodeled emitted field can never yield a false PROVEN (audit FP-2).
+    for cons, obs_list, emit_count in e.emit_obs_on_accept:
         n_checked += 1
-        for emit in emits:
-            for v in _emit_values(emit):
-                if _depends_on(v, entropy_names):
-                    print("\n❌ COUNTEREXAMPLE — an EMITTED transaction value depends on ledger "
-                          "entropy (nonce/seq/last_time): the previewed emit (amount/destination) "
-                          "can differ at execution. Preview is not faithful.")
-                    return 2
+        parsed = [o for o in obs_list if o is not None]
+        if emit_count > len(parsed):
+            print("\n⚠️ INCONCLUSIVE — an accepting path emits a transaction whose blob is not the "
+                  "recognized native-Payment template (e.g. an IOU or custom emit); its routing "
+                  "fields can't be checked for entropy dependence. Cannot claim PROVEN (fail-closed).")
+            return 3
+        for obs in parsed:
+            fields = [obs["amount"], obs["dtag"], obs["stag"], *obs["dest"]]
+            if any(_depends_on(v, entropy_names) for v in fields):
+                print("\n❌ COUNTEREXAMPLE — an EMITTED transaction's money-routing field "
+                      "(amount / DESTINATION / destination-tag / source-tag) depends on ledger "
+                      "entropy (nonce/seq/last_time): the previewed emit can be re-routed or "
+                      "re-valued at execution. Preview is not faithful.")
+                return 2
 
     # (3) STATE-WRITE dependence — a previewed persisted effect that varies with entropy.
     for code, cons, writes in e.accepts_full:

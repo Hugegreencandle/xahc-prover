@@ -226,6 +226,12 @@ def test_matrix_verdicts():
     assert prove_preview_faithfulness.main(os.path.join(H, "preview_seqgate_bug.wasm")) == 2
     assert prove_preview_faithfulness.main(os.path.join(H, "preview_state_entropy_bug.wasm")) == 2
     assert prove_preview_faithfulness.main(os.path.join(H, "agent_guardrail.wasm")) == 0
+    # audit FP-1/FP-2: an EMITTED payment whose recipient/tag is entropy-chosen (money misdirection)
+    # must CEX (not just the amount); a faithful emit (fixed routing) PROVEN; an unrecognized emit
+    # fails closed. (preview_emit_dtag_bug exercises the destination-tag path.)
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_faithful.wasm")) == 0
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_dest_bug.wasm")) == 2
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_dtag_bug.wasm")) == 2
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
