@@ -31,8 +31,10 @@ DST_KEY = "param:DST"
 
 
 def main(path: str) -> int:
-    e = Engine(open(path, "rb").read())
+    # Construct AND run inside the guard: a parse-time fault (corrupt/non-wasm input) during
+    # Engine() must also fail closed to INCONCLUSIVE, not exit 1 (which aliases N/A). [audit DSTLOCK-1]
     try:
+        e = Engine(open(path, "rb").read())
         e.run()
     except Exception as ex:  # noqa: BLE001 — fail closed, never crash to an N/A-aliasing exit
         print(f"\n⚠️ INCONCLUSIVE — engine could not analyze the hook ({type(ex).__name__}: "
