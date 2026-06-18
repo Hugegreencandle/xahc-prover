@@ -33,6 +33,11 @@ def unsound_gate(e) -> int | None:
         print("\n⚠️ INCONCLUSIVE — a loop exceeded the guard unroll bound; the unexplored tail "
               "could violate the property. Cannot claim PROVEN.")
         return 3
+    if getattr(e, "analysis_errors", None):
+        print(f"\n⚠️ INCONCLUSIVE — the engine could not soundly step some path(s) "
+              f"{sorted(e.analysis_errors)} (e.g. a symbolic value where a concrete was required); "
+              "that path was dropped. Cannot claim PROVEN.")
+        return 3
     return None
 
 

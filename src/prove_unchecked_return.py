@@ -47,11 +47,13 @@ def main(path: str) -> int:
     # accept paths / mutations before they were snapshotted. Reporting N/A ("property doesn't
     # apply") for an incomplete run mislabels incompleteness as inapplicability. So gate before
     # the N/A early-returns: incompleteness => INCONCLUSIVE(3), never N/A(1).
-    if e.float_overapprox or e.unsupported or e.hit_bound:
+    if e.float_overapprox or e.unsupported or e.hit_bound or getattr(e, "analysis_errors", None):
         why = []
         if e.float_overapprox: why.append(f"float op(s) {sorted(e.float_overapprox)} over-approximated")
         if e.unsupported: why.append(f"unsupported opcode(s) {sorted(e.unsupported)} reached")
         if e.hit_bound: why.append("a loop exceeded the unroll bound")
+        if getattr(e, "analysis_errors", None):
+            why.append(f"path step error(s) {sorted(e.analysis_errors)} (dropped path)")
         print(f"\n⚠️ INCONCLUSIVE — analysis incomplete ({'; '.join(why)}); accept paths/mutations "
               "may be unexplored, so cannot claim N/A or PROVEN.")
         return 3

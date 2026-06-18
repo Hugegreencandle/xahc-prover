@@ -1305,9 +1305,11 @@ def test_symbolic_field_content_is_not_concretized():
     assert s.check() == z3.sat, "symbolic content accept wrongly concretized to infeasible"
 
 
-def test_symbolic_field_retlen_into_memidx_fails_loud():
-    # (c) the symbolic return length used as a memory ADDRESS must raise conc()
-    # RuntimeError (fail loud -> exit 1), never silently flow on to a PROVEN.
+def test_symbolic_field_retlen_into_memidx_fails_closed():
+    # (c) a symbolic return length used as a memory ADDRESS cannot be soundly stepped. The engine
+    # now records it as an analysis error and DROPS the path (fail CLOSED -> unsound_gate ->
+    # INCONCLUSIVE), instead of crashing out with an exit code that aliases N/A. The soundness
+    # guarantee is unchanged: it must NEVER silently flow on to an accept / a PROVEN. [FP-BOOT-03]
     otxn_ft = _ftype([I32, I32, I32], [I64]); accept_ft = _ftype([I32, I32, I32], [I64])
     types = [_ftype([I32], [I64]), otxn_ft, accept_ft]
 
@@ -1320,14 +1322,12 @@ def test_symbolic_field_retlen_into_memidx_fails_loud():
             + bytes([0x28]) + _uleb(2) + _uleb(0)                              # i32.load (conc(symbolic addr)!)
             + bytes([0x1A]) + accept_call + _i64c(0) + bytes([0x0B]))
     wasm = _module(types, imports, export_fn_idx=2, data_off=1024, data_bytes=bytes(64), body=body)
+    from soundness import unsound_gate
     e = Engine(wasm)
-    raised = False
-    try:
-        e.run()
-    except RuntimeError:
-        raised = True
-    assert raised, "symbolic return length into a memory index must fail loud (conc RuntimeError)"
+    e.run()   # graceful now: no crash — the unanalyzable path is recorded + dropped
+    assert e.analysis_errors, "symbolic memory index must be recorded as an analysis error"
     assert not e.accepts, "must not reach an accept with a symbolic memory index"
+    assert unsound_gate(e) == 3, "a driver must fail closed to INCONCLUSIVE on the unanalyzable path"
 
 
 def test_multivalue_blocktype_fails_loud():

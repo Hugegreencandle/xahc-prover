@@ -190,6 +190,12 @@ class Engine:
         # never PROVEN. Recorded here (rather than crashing with a confusing stack
         # underflow) so drivers can fail closed.
         self.unsupported = set()
+        # An uncaught engine exception during a path step (e.g. a symbolic value where a concrete
+        # is required — a symbolic guard-id / load-store base) is an ANALYSIS error: that path
+        # cannot be soundly modeled. We record it (rather than letting it crash out with an exit
+        # code that aliases N/A) and DROP the path; unsound_gate turns this into INCONCLUSIVE so
+        # NO driver can reach a PROVEN past an unanalyzable path. [audit FP-BOOT-03, made systemic]
+        self.analysis_errors = set()
         # ---- commitment integrity (#commitment): model util_sha512h as an UNINTERPRETED
         # function per input-width. Same input expression -> same 256-bit output symbol; two
         # different inputs are NOT provably equal (z3 only entails H(x)==H(y) when x==y). That is
@@ -1030,7 +1036,16 @@ class Engine:
         for ins in instrs:
             nxt = []
             for p in live:
-                for sig, pp in self._exec(ins, p):
+                try:
+                    stepped = self._exec(ins, p)
+                except Terminal:
+                    raise   # accept/rollback is normal control flow, handled by callers
+                except Exception as ex:  # noqa: BLE001
+                    # this path can't be soundly stepped (e.g. symbolic-where-concrete). Record it
+                    # and DROP the path -> fail closed (unsound_gate -> INCONCLUSIVE), never crash.
+                    self.analysis_errors.add(f"{type(ex).__name__}: {str(ex)[:80]}")
+                    continue
+                for sig, pp in stepped:
                     if sig is None:
                         nxt.append(pp)
                     else:
