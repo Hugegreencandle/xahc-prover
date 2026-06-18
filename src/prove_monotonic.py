@@ -17,7 +17,7 @@ Usage: python prove_monotonic.py <hook.wasm> [--strict] [--field SLOTHEX:OFF:LEN
 import sys
 import z3
 from prover import Engine, feasible
-from soundness import unsound_gate
+from soundness import unsound_gate, vacuity_guard
 from field import parse_field, bv_byte_slice
 
 
@@ -29,6 +29,11 @@ def main(path: str, strict: bool = False, field=None) -> int:
           f"state keys written: {sorted({k for _, _, w in e.accepts_full for k in w})}"
           + (f"; targeting field {field}" if field else ""))
 
+    # Count comparisons ACTUALLY performed. A PROVEN is only sound if at least one feasible
+    # accepting path's write was checked against its prior value — otherwise it is VACUOUS
+    # (e.g. --field targets a slot no path writes, or the hook persists no state at all). [audit
+    # FS-CRIT-1 / FS-HIGH-1: --field on an unwritten key fell through to a false PROVEN.]
+    n_checked = 0
     for code, cons, writes in e.accepts_full:
         # only consider paths that are actually reachable
         if not feasible(cons):
@@ -41,6 +46,7 @@ def main(path: str, strict: bool = False, field=None) -> int:
                 continue   # this path doesn't persist the targeted slot — nothing to check here
             items = [(field.key, writes[field.key])]
         for kn, wval in items:
+            n_checked += 1
             old_bytes = e.state_old.get(kn)
             # SOUND: a write to a key that was NEVER read on any path means the
             # hook overwrites persisted state with NO regard for its prior value —
@@ -100,7 +106,18 @@ def main(path: str, strict: bool = False, field=None) -> int:
     if code is not None:
         return code
 
-    print(f"\n✅ PROVEN — for ALL inputs, every accepted write to hook state is "
+    # FAIL CLOSED on vacuity: if NO feasible accepting path's write was checked, a PROVEN would be
+    # vacuous — the property was never exercised (the headline --field feature makes this trivially
+    # reachable via a key/offset that no path writes). Return N/A, never PROVEN. [audit FS-CRIT-1]
+    what = (f"monotonicity of field {field.key!r}[{field.off}:{field.off + field.length}] "
+            f"(no accepting path writes that slot)") if field is not None \
+        else "state monotonicity (no accepting path writes any state)"
+    code = vacuity_guard(n_checked, what)
+    if code is not None:
+        return code
+
+    print(f"\n✅ PROVEN — for ALL inputs, every accepted write to "
+          f"{'the targeted field' if field is not None else 'hook state'} is "
           f"{'strictly greater than' if strict else 'never below'} its prior value. "
           f"State is monotonic; no replay/rollback.")
     return 0

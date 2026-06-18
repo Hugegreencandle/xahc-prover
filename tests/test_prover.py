@@ -204,6 +204,13 @@ def test_matrix_verdicts():
     assert prove_resource_conservation.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 0  # resource conserved
     assert prove_resource_conservation.main(os.path.join(H, "arena_resource_inflate_bug.wasm"), field=RES) == 2
     assert prove_monotonic.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 2            # real targeting: resource not monotonic
+    # VACUITY GUARD (audit FS-CRIT-1/FS-HIGH-1): --field on a slot NO path writes, or a hook that
+    # writes no state, must FAIL CLOSED to N/A (1) — NEVER a vacuous PROVEN. The catastrophic case:
+    # a hook with a real rollback bug, targeted on an unwritten key, previously returned PROVEN.
+    UNWRITTEN = parse_field("09:0:8")
+    assert prove_monotonic.main(os.path.join(H, "arena_tick_rollback_bug.wasm"), field=UNWRITTEN) == 1
+    assert prove_monotonic.main(os.path.join(H, "arena_kernel.wasm"), field=parse_field("02:0:8")) == 1
+    assert prove_monotonic.main(os.path.join(H, "authz.wasm")) == 1   # writes no state -> N/A, not PROVEN
     # COMMITMENT-INTEGRITY (accept ⟹ committed root == SHA512Half(persisted state); EverArcade B):
     #   honest hash -> PROVEN (0); constant forged root -> CEX (2); stale H(old) while persisting
     #   new -> CEX (2, proves H distinguishes inputs / non-vacuous); no commit slot -> N/A (1).

@@ -21,7 +21,7 @@ Usage: python prove_commitment.py <hook.wasm> [--state-key HEX] [--commit-key HE
 import sys
 import z3
 from prover import Engine, feasible
-from soundness import unsound_gate
+from soundness import unsound_gate, vacuity_guard
 
 STATE_KEY = "\x01"
 COMMIT_KEY = "\x02"
@@ -41,9 +41,11 @@ def main(path: str, state_key: str = STATE_KEY, commit_key: str = COMMIT_KEY) ->
           f"({len(commit_writes)} persist the commit slot 0x{ord(commit_key):02x}); "
           f"state slot 0x{ord(state_key):02x}")
 
+    n_checked = 0
     for code, cons, writes in commit_writes:
         if not feasible(cons):
             continue
+        n_checked += 1
         root = writes[commit_key]
         if root.size() != 256:
             print(f"\n⚠️ INCONCLUSIVE — the committed value is {root.size() // 8}B, not a 32-byte "
@@ -80,6 +82,11 @@ def main(path: str, state_key: str = STATE_KEY, commit_key: str = COMMIT_KEY) ->
             return 2
 
     code = unsound_gate(e)
+    if code is not None:
+        return code
+
+    # FAIL CLOSED on vacuity: every commit_writes path was infeasible -> nothing checked. [audit COMMIT-1]
+    code = vacuity_guard(n_checked, "commitment integrity (no feasible accepting path commits a root)")
     if code is not None:
         return code
 
