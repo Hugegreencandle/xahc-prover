@@ -15,6 +15,7 @@ Usage: python prove_validate.py <hook.wasm> [KEY]   (KEY default "LIM")
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str, key: str = "LIM") -> int:
@@ -43,12 +44,9 @@ def main(path: str, key: str = "LIM") -> int:
                   f"proceeded — the unset/garbage value was trusted (fail-OPEN).")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print(f"\n✅ PROVEN — for ALL inputs, the hook never accepts unless required param '{key}' "
           f"is present. Fail-closed.")

@@ -17,6 +17,7 @@ Usage: python prove_monotonic.py <hook.wasm> [--strict] [--field SLOTHEX:OFF:LEN
 import sys
 import z3
 from prover import Engine, feasible
+from soundness import unsound_gate
 from field import parse_field, bv_byte_slice
 
 
@@ -95,15 +96,9 @@ def main(path: str, strict: bool = False, field=None) -> int:
                       f"Cannot claim PROVEN.")
                 return 3
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "
-              f"monotonicity. Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations "
-              "were not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print(f"\n✅ PROVEN — for ALL inputs, every accepted write to hook state is "
           f"{'strictly greater than' if strict else 'never below'} its prior value. "

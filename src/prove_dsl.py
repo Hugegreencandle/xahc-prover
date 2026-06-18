@@ -11,6 +11,7 @@ reject (1). The DSL path reuses the engine's exact fail-closed gating — it byp
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 import dsl
 
 
@@ -70,13 +71,9 @@ def evaluate(e, ast, predicate: str = "") -> int:
         print(f"\n⚠️ INCONCLUSIVE — XFL term in the predicate but float op(s) "
               f"{sorted(e.float_overapprox)} were over-approximated; cannot claim PROVEN.")
         return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; "
-              f"not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     # bool-at-root gate (also enforced in main() before the engine runs). Re-checked here so
     # NO caller of evaluate() can reach PROVEN with a non-boolean predicate — on a zero-accept

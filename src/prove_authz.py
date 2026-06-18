@@ -14,6 +14,7 @@ Usage: python prove_authz.py <hook.wasm>
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str) -> int:
@@ -48,12 +49,9 @@ def main(path: str) -> int:
             print(f"   hook owner          = {mv.hex().upper()}")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, the hook only accepts transactions whose originating "
           "account is the owner. No unauthorized trigger.")

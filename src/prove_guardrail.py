@@ -12,6 +12,7 @@ Usage: python prove_guardrail.py <agent_guardrail.wasm> [max_drops]
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 from watch.predicates import decode_drops, over_limit, dest_not_allowed, Z3Ops
 
 
@@ -97,14 +98,9 @@ def main(path: str, max_drops: int | None = None) -> int:
     else:
         dst_proven = False   # hook reads no DST param — lock invariant N/A
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove. "
-              f"Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN [spend-limit] — for ALL inputs, the guardrail never accepts an outgoing payment over LIM.")
     if dst_proven:

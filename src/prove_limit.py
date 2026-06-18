@@ -8,6 +8,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 1 = error.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str, max_drops: int | None = None) -> int:
@@ -54,14 +55,9 @@ def main(path: str, max_drops: int | None = None) -> int:
             print(f"   LIM param bytes = {bytes(lv).hex().upper()}")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove. "
-              f"Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, the hook never accepts when drops > LIM.")
     return 0

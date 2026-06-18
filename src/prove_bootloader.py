@@ -30,6 +30,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = N/A.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 N = 32  # SHA-512Half digest length
 
@@ -80,12 +81,9 @@ def main(path: str) -> int:
             print("   => the loader could be tricked into running UNVERIFIED stage-2 bytes.")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, the gate accepts (hands control to stage-2) ONLY when the "
           "candidate hash equals the pinned hash, all 32 bytes. ASSUMING the wallet computes "

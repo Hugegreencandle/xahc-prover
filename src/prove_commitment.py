@@ -21,6 +21,7 @@ Usage: python prove_commitment.py <hook.wasm> [--state-key HEX] [--commit-key HE
 import sys
 import z3
 from prover import Engine, feasible
+from soundness import unsound_gate
 
 STATE_KEY = "\x01"
 COMMIT_KEY = "\x02"
@@ -78,15 +79,9 @@ def main(path: str, state_key: str = STATE_KEY, commit_key: str = COMMIT_KEY) ->
                   "the state it claims to commit.")
             return 2
 
-    if e.float_overapprox:
-        print(f"\n⚠️ INCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} over-approximated; not PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, every accepted commit root equals SHA512Half of the state "
           "it commits (committed_root == H(state)). The root is cryptographically BOUND to its "

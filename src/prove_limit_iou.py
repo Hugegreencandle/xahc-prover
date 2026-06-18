@@ -12,6 +12,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = error.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str) -> int:
@@ -56,19 +57,9 @@ def main(path: str) -> int:
             print(f"   accept code {code}: amt XFL={av} > LIM XFL={lv}")
             return 2
 
-    if e.float_overapprox:
-        print(f"\nINCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} were over-approximated "
-              f"(symbolic nonlinear), and an over-approximated value could reach the invariant. "
-              f"Refusing to claim PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\nINCONCLUSIVE — unsupported op(s) {sorted(e.unsupported)} reached during "
-              f"analysis; cannot prove. Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\nINCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were not "
-              "explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\nPROVEN — for ALL inputs, the hook never accepts when XFL(amount) > XFL(LIM).")
     return 0

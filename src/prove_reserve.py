@@ -39,6 +39,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = N/A.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 W = 128
 
@@ -130,16 +131,9 @@ def main(path: str) -> int:
                   f"RESERVE_INSUFFICIENT (-38)")
             return 2
 
-    if e.float_overapprox:
-        print(f"\n⚠️ INCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} over-approximated; "
-              f"not PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, no accepting path drives the account below its XAH "
           "reserve (base + owner_count*increment). Reserve-safe.")

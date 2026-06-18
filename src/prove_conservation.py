@@ -14,6 +14,7 @@ Usage: python prove_conservation.py <hook.wasm>
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str) -> int:
@@ -105,20 +106,9 @@ def main(path: str) -> int:
                   f"across {count} payment(s)")
             return 2
 
-    if e.float_overapprox:
-        print(f"\n⚠️ INCONCLUSIVE — float op(s) {sorted(e.float_overapprox)} were "
-              f"over-approximated (symbolic nonlinear); an over-approximated value may "
-              f"reach the conservation invariant. Refusing to claim PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "
-              f"conservation. Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations "
-              "were not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, the total emitted never exceeds the incoming "
           "amount. Balance is conserved; no value created.")
