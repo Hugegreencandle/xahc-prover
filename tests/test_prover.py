@@ -27,6 +27,7 @@ import prove_preview_faithfulness                                           # no
 import prove_boot_upgrade                                                   # noqa: E402
 import prove_permissioned_transfer                                          # noqa: E402
 import prove_dst_lock                                                       # noqa: E402
+import prove_rate_limit                                                     # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -259,6 +260,20 @@ def test_matrix_verdicts():
     assert prove_dst_lock.main(os.path.join(H, "dst_lock_ok.wasm")) == 0
     assert prove_dst_lock.main(os.path.join(H, "dst_lock_bug.wasm")) == 2
     assert prove_dst_lock.main(os.path.join(H, "authz.wasm")) == 1
+    # RATE-LIMIT (cooldown): accept ⟹ now-prior >= COOLDOWN AND the stamp is the real ledger clock.
+    #   overflow-safe gate -> PROVEN; no gate -> CEX; attacker-spoofed stamp -> CEX; naive last+cd
+    #   gate -> CEX (the prover catches the uint64 overflow); no COOLDOWN/time read -> N/A.
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_ok.wasm")) == 0
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_nogate_bug.wasm")) == 2
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_spoof_bug.wasm")) == 2
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_overflow_bug.wasm")) == 2
+    # burst-bypass: accept-always + stamp=max(now,prior+cd) looks compliant but isn't — the gate is
+    # on the REAL ledger clock (not the stamp), so it's caught as CEX.
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_burst_bug.wasm")) == 2
+    # bypass (audit FP-RL-01): a SECOND accept path with no cooldown/stamp (override/early-accept)
+    # is a spam bypass — checking EVERY accept (not just slot-writers) catches it as CEX.
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_bypass_bug.wasm")) == 2
+    assert prove_rate_limit.main(os.path.join(H, "authz.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
