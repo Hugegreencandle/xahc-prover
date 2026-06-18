@@ -44,17 +44,31 @@ VER = parse_field("01:0:8")   # the version sub-field (first 8 bytes, big-endian
 
 def main(path: str) -> int:
     e = Engine(open(path, "rb").read())
-    e.run()
+    # FAIL CLOSED on an engine error: an uncaught exception (e.g. a symbolic guard-id) must map to
+    # INCONCLUSIVE (3), NOT crash out with exit 1 — which aliases the N/A code an orchestrator keys
+    # on. [audit FP-BOOT-03] A crash can never be a PROVEN, but it must not masquerade as N/A.
+    try:
+        e.run()
+    except Exception as ex:  # noqa: BLE001
+        print(f"\n⚠️ INCONCLUSIVE — the engine could not analyze the hook "
+              f"({type(ex).__name__}: {str(ex)[:140]}); could not prove. Not PROVEN.")
+        return 3
 
     origin = e.inputs.get("origin")
     owner = e.inputs.get("hookacc")
 
     repins = [(c, cons, w) for (c, cons, w) in e.accepts_full if SLOT in w]
+    all_keys = sorted({f"0x{ord(k):02x}" for _, _, w in e.accepts_full for k in w})
     print(f"explored: {len(e.accepts_full)} accepting path(s); {len(repins)} persist the boot slot "
           f"0x{ord(SLOT):02x} [version|hash]")
     if not repins:
-        print(f"N/A — no accepting path re-pins the boot slot (key 0x{ord(SLOT):02x}); the "
-              "upgrade-authorization property is not exercised. Not claimed.")
+        # SCOPE: this invariant assumes the boot blob is pinned under slot 0x01. Name the slots the
+        # hook ACTUALLY persisted so an operator can confirm the convention matches their bootloader
+        # (a re-pin under a different key is NOT analyzed here). [audit FP-BOOT-02]
+        print(f"N/A — no accepting path re-pins the boot slot 0x{ord(SLOT):02x}; the upgrade-"
+              f"authorization property is not exercised. Not claimed. (Slots this hook writes on "
+              f"accept: {all_keys or 'none'} — if your bootloader pins under a different key, this "
+              "invariant does not cover it.)")
         return 1
     # A hook that RE-PINS but never reads BOTH sfAccount (origin) and hook_account (owner) cannot be
     # gating the re-pin on authorization at all — it accepts a pin change with no owner check. That
