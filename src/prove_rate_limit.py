@@ -20,6 +20,13 @@ the slot:
   (B) the written value DEPENDS on ledger_last_time         — else COUNTEREXAMPLE (spoofable stamp)
 128-bit compare avoids wrap masking a real violation.
 
+STRICT FORM (every accept is a gated action): the check runs over EVERY feasible accepting path. An
+accept that does NOT stamp the cooldown slot is an action accepted WITHOUT the rate-limit gate (an
+admin override, an early accept, an attacker-triggered branch) -> COUNTEREXAMPLE. A hook that
+legitimately accepts non-actions on pass-through paths must scope to the gated accept, or rollback
+non-actions so every accept is a rate-limited action. [audit FP-RL-01: filtering to slot-writers let
+a bypass accept slip a false PROVEN.]
+
 Fail closed: solver `unknown` / unsupported / hit bound / dropped path -> INCONCLUSIVE. No COOLDOWN
 param or no ledger_last_time read -> N/A. No accept writes the slot -> N/A (vacuity_guard), never a
 vacuous PROVEN.
@@ -59,13 +66,22 @@ def main(path: str) -> int:
         return 1
     COOLDOWN = z3.Concat(*cd) if isinstance(cd, list) and len(cd) > 1 else (cd[0] if isinstance(cd, list) else cd)
 
-    writes_slot = [(c, cons, w) for (c, cons, w) in e.accepts_full if SLOT in w]
-    print(f"explored: {len(e.accepts_full)} accepting path(s); {len(writes_slot)} stamp the "
+    n_slot = sum(1 for (_, _, w) in e.accepts_full if SLOT in w)
+    print(f"explored: {len(e.accepts_full)} accepting path(s); {n_slot} stamp the "
           f"rate-limit slot 0x{ord(SLOT):02x}")
     n_checked = 0
-    for code, cons, writes in writes_slot:
+    # Check EVERY feasible accept — not just the slot-stamping ones. An accept that does NOT stamp
+    # the cooldown slot is an action accepted WITHOUT the rate-limit gate (an admin override, an
+    # early accept, an attacker-triggered branch) = a spam bypass. Filtering to slot-writers let
+    # such a path slip a false PROVEN. [audit FP-RL-01] Strict-form, like prove_authz/permissioned.
+    for code, cons, writes in e.accepts_full:
         if not feasible(cons):
             continue
+        if SLOT not in writes:
+            print("\n❌ COUNTEREXAMPLE — an accepting path does NOT stamp the cooldown slot "
+                  f"0x{ord(SLOT):02x}: this action is accepted WITHOUT any elapsed-time gate (a "
+                  "rate-limit bypass — e.g. an override / early accept / attacker-triggered branch).")
+            return 2
         new = writes[SLOT]
         old_bytes = e.state_old.get(SLOT)
         if not old_bytes:

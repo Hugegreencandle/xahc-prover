@@ -270,6 +270,9 @@ def test_matrix_verdicts():
     # burst-bypass: accept-always + stamp=max(now,prior+cd) looks compliant but isn't — the gate is
     # on the REAL ledger clock (not the stamp), so it's caught as CEX.
     assert prove_rate_limit.main(os.path.join(H, "rate_limit_burst_bug.wasm")) == 2
+    # bypass (audit FP-RL-01): a SECOND accept path with no cooldown/stamp (override/early-accept)
+    # is a spam bypass — checking EVERY accept (not just slot-writers) catches it as CEX.
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_bypass_bug.wasm")) == 2
     assert prove_rate_limit.main(os.path.join(H, "authz.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
