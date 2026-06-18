@@ -42,24 +42,6 @@ def z128(x):
     return z3.ZeroExt(W - x.size(), x) if x.size() < W else x
 
 
-def _depends_on(expr, target):
-    if not z3.is_ast(expr):
-        return False
-    seen = set(); st = [expr]
-    while st:
-        n = st.pop()
-        if not z3.is_ast(n):
-            continue
-        k = n.get_id()
-        if k in seen:
-            continue
-        seen.add(k)
-        if z3.is_const(n) and n.decl().kind() == z3.Z3_OP_UNINTERPRETED and str(n) == target:
-            return True
-        st.extend(n.children())
-    return False
-
-
 def main(path: str) -> int:
     try:
         e = Engine(open(path, "rb").read())
@@ -97,17 +79,12 @@ def main(path: str) -> int:
             return 3
         n_checked += 1
 
-        # (B) the stamped value must be the real ledger clock, not an attacker-chosen value.
-        if not _depends_on(new, TIME_NAME):
-            print("\n❌ COUNTEREXAMPLE — the stamped timestamp does NOT depend on ledger_last_time: "
-                  "it is an attacker-controllable value, so the elapsed-time gate is spoofable "
-                  "(write prior+COOLDOWN and bypass the cooldown).")
-            return 2
-
-        # (A) the gate: every accept must be at least COOLDOWN past the prior stamp.
+        # (A) THE GATE — on the REAL ledger clock, not the written stamp. (Checking the stamp would
+        # let `stamp = max(now, prior+COOLDOWN)` accept too-soon yet look compliant — a burst bypass.)
+        # accept must imply the actual ledger time is >= prior + COOLDOWN.
         s = z3.Solver(); s.set("timeout", 120000)
         s.add(*cons)
-        s.add(z3.ULT(z128(new), z128(old) + z128(COOLDOWN)))
+        s.add(z3.ULT(z128(now), z128(old) + z128(COOLDOWN)))
         r = s.check()
         if r == z3.unknown:
             print(f"\n⚠️ INCONCLUSIVE — solver `unknown` on accept code {code}; not PROVEN.")
@@ -115,8 +92,23 @@ def main(path: str) -> int:
         if r == z3.sat:
             m = s.model(); ev = lambda b: m.eval(b, model_completion=True).as_long()
             print("\n❌ COUNTEREXAMPLE — accept fires BEFORE the cooldown elapsed:")
-            print(f"   new stamp = {ev(z128(new))}   prior = {ev(z128(old))}   "
-                  f"COOLDOWN = {ev(z128(COOLDOWN))}  (new < prior + COOLDOWN)")
+            print(f"   ledger time = {ev(z128(now))}   prior = {ev(z128(old))}   "
+                  f"COOLDOWN = {ev(z128(COOLDOWN))}  (now < prior + COOLDOWN)")
+            return 2
+
+        # (B) HONEST STAMP (sound induction) — the persisted timestamp must EQUAL the real ledger
+        # clock, so the next cooldown's "prior" is a true past time (not an attacker/forward value).
+        s2 = z3.Solver(); s2.set("timeout", 120000)
+        s2.add(*cons)
+        s2.add(new != now)
+        r2 = s2.check()
+        if r2 == z3.unknown:
+            print(f"\n⚠️ INCONCLUSIVE — solver `unknown` on the stamp-honesty query (code {code}); not PROVEN.")
+            return 3
+        if r2 == z3.sat:
+            print("\n❌ COUNTEREXAMPLE — the persisted timestamp is NOT the real ledger clock "
+                  "(ledger_last_time): a spoofable / forward-dated stamp breaks the cooldown's "
+                  "induction (an attacker stamps prior+COOLDOWN and bypasses the gate next time).")
             return 2
 
     code = unsound_gate(e)

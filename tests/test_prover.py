@@ -267,6 +267,9 @@ def test_matrix_verdicts():
     assert prove_rate_limit.main(os.path.join(H, "rate_limit_nogate_bug.wasm")) == 2
     assert prove_rate_limit.main(os.path.join(H, "rate_limit_spoof_bug.wasm")) == 2
     assert prove_rate_limit.main(os.path.join(H, "rate_limit_overflow_bug.wasm")) == 2
+    # burst-bypass: accept-always + stamp=max(now,prior+cd) looks compliant but isn't — the gate is
+    # on the REAL ledger clock (not the stamp), so it's caught as CEX.
+    assert prove_rate_limit.main(os.path.join(H, "rate_limit_burst_bug.wasm")) == 2
     assert prove_rate_limit.main(os.path.join(H, "authz.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
