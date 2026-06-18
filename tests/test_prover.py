@@ -22,6 +22,7 @@ import prove_unchecked_return                                               # no
 import prove_validate_range                                                 # noqa: E402
 import prove_resource_conservation                                          # noqa: E402
 import prove_bootloader                                                     # noqa: E402
+import prove_commitment                                                     # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -203,6 +204,13 @@ def test_matrix_verdicts():
     assert prove_resource_conservation.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 0  # resource conserved
     assert prove_resource_conservation.main(os.path.join(H, "arena_resource_inflate_bug.wasm"), field=RES) == 2
     assert prove_monotonic.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 2            # real targeting: resource not monotonic
+    # COMMITMENT-INTEGRITY (accept ⟹ committed root == SHA512Half(persisted state); EverArcade B):
+    #   honest hash -> PROVEN (0); constant forged root -> CEX (2); stale H(old) while persisting
+    #   new -> CEX (2, proves H distinguishes inputs / non-vacuous); no commit slot -> N/A (1).
+    assert prove_commitment.main(os.path.join(H, "commit_kernel.wasm")) == 0
+    assert prove_commitment.main(os.path.join(H, "commit_constant_bug.wasm")) == 2
+    assert prove_commitment.main(os.path.join(H, "commit_stale_bug.wasm")) == 2
+    assert prove_commitment.main(os.path.join(H, "arena_kernel.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)

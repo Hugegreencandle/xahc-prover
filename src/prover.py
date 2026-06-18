@@ -184,6 +184,13 @@ class Engine:
         # never PROVEN. Recorded here (rather than crashing with a confusing stack
         # underflow) so drivers can fail closed.
         self.unsupported = set()
+        # ---- commitment integrity (#commitment): model util_sha512h as an UNINTERPRETED
+        # function per input-width. Same input expression -> same 256-bit output symbol; two
+        # different inputs are NOT provably equal (z3 only entails H(x)==H(y) when x==y). That is
+        # exactly the cryptographic-commitment property we can prove WITHOUT modeling SHA internals:
+        # a commitment is BOUND to its input, so a constant / stale / wrong-bytes root cannot equal
+        # H(the real state). Memoized so the driver and the engine share one H. ----
+        self._hashfns = {}
         # SOUNDNESS (XFL/money): ops whose RESULT VALUE we could not compute soundly
         # (any symbolic operand to a nonlinear float op) and replaced with a FRESH
         # over-approximating symbolic. The value carries NO equality to the true XFL
@@ -239,6 +246,18 @@ class Engine:
         bs = [z3.BitVec(f"{name}_{i}", 8) for i in range(n)]
         self.inputs[name] = bs
         return bs
+
+    def sha512h(self, data):
+        """Uninterpreted SHA-512Half model: a deterministic 256-bit (32B) function of the input
+        BitVec. Memoized per input WIDTH (z3 Function sorts are fixed). The driver calls this with
+        the SAME `data` expression the hook hashed, so committed==H(state) holds iff the hook truly
+        committed the hash of that state. SOUND: H is opaque, so it never fabricates a collision."""
+        w = data.size()
+        fn = self._hashfns.get(w)
+        if fn is None:
+            fn = z3.Function(f"sha512h_{w}", z3.BitVecSort(w), z3.BitVecSort(256))
+            self._hashfns[w] = fn
+        return fn(data)
 
     # ---- memory (concrete addressing) ----
     def store_bytes(self, p: Path, addr: int, bs: list):
@@ -514,6 +533,18 @@ class Engine:
                 p.mutation_rets.append((ret, f"state_set#{idx}"))
                 st.append(ret); return
             st.append(z3.BitVecVal(n, 64)); return
+        if name == "util_sha512h":
+            # util_sha512h(write_ptr, write_len, read_ptr, read_len) -> bytes written (32) | <0.
+            # Reads read_len input bytes, writes the 32-byte SHA-512Half. Modeled as the
+            # uninterpreted H over the input (see self.sha512h). The 256-bit output is split BE
+            # into 32 memory bytes so a downstream state_set persists exactly H(input).
+            rlen = conc(st.pop()); rptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
+            n = max(1, min(rlen, 256))
+            inp = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian input
+            digest = self.sha512h(z3.Concat(*inp) if n > 1 else inp[0])   # 256-bit
+            out = [z3.Extract(255 - 8 * i, 248 - 8 * i, digest) for i in range(32)]  # BE 32 bytes
+            self.store_bytes(p, wptr, out[:max(1, min(wlen, 32))])
+            st.append(z3.BitVecVal(32, 64)); return
         # ---- foreign-state host fns (#6 foreign-state authorization) ----
         if name == "state_foreign":
             # state_foreign(write_ptr,wlen, kread_ptr,klen, nread_ptr,nlen, aread_ptr,alen)
