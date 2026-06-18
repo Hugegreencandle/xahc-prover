@@ -23,6 +23,7 @@ import prove_validate_range                                                 # no
 import prove_resource_conservation                                          # noqa: E402
 import prove_bootloader                                                     # noqa: E402
 import prove_commitment                                                     # noqa: E402
+import prove_preview_faithfulness                                           # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -218,6 +219,22 @@ def test_matrix_verdicts():
     assert prove_commitment.main(os.path.join(H, "commit_constant_bug.wasm")) == 2
     assert prove_commitment.main(os.path.join(H, "commit_stale_bug.wasm")) == 2
     assert prove_commitment.main(os.path.join(H, "arena_kernel.wasm")) == 1
+    # PREVIEW-FAITHFULNESS (#23, Xaman): outcome invariant under ledger entropy (nonce/seq/time)?
+    #   faithful (decision+state = f(signed tx)) -> PROVEN; seq-gated decision -> CEX; state write
+    #   = ledger_last_time -> CEX. The real deployed agent_guardrail is preview-faithful.
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_faithful.wasm")) == 0
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_seqgate_bug.wasm")) == 2
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_state_entropy_bug.wasm")) == 2
+    assert prove_preview_faithfulness.main(os.path.join(H, "agent_guardrail.wasm")) == 0
+    # v1 emit scope (audit FP-1/FP-3/FP-4): a positive allowlist of checked emit fields is unsound
+    # (the next omitted observable field — dest, tag, Flags, InvoiceID, … — slips a false PROVEN).
+    # v1 FAILS CLOSED: ANY emit on an accepting path -> INCONCLUSIVE (3), never PROVEN. The dest/tag/
+    # Flags/InvoiceID entropy bugs ALL resolve to INCONCLUSIVE (sound) rather than a wrong verdict.
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_faithful.wasm")) == 3
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_dest_bug.wasm")) == 3
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_dtag_bug.wasm")) == 3
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_flags_bug.wasm")) == 3
+    assert prove_preview_faithfulness.main(os.path.join(H, "preview_emit_invoice_bug.wasm")) == 3
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
