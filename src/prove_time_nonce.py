@@ -53,6 +53,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def _depends_on(expr, target_names: set) -> bool:
@@ -137,12 +138,9 @@ def main(path: str) -> int:
                           "(fail-closed).")
                     return 3
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, no accept decision hinges on ledger_nonce. "
           "(Legitimate ledger_seq/ledger_last_time deadlines are not flagged — see docstring.)")

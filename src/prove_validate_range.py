@@ -29,6 +29,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = N/A.
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str) -> int:
@@ -94,12 +95,9 @@ def main(path: str) -> int:
                   "int64 range hook is out of this driver's contract.")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, the hook never accepts unless VAL is present AND within "
           "its declared [LO_, HI_] bounds (UNSIGNED LO_ <= VAL <= HI_). SC04 range validation: "

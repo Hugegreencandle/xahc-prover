@@ -19,6 +19,7 @@ Usage: python prove_overflow.py <hook.wasm>
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 W = 128
 
@@ -56,12 +57,9 @@ def main(path: str) -> int:
                   f"(the 64-bit sum wrapped below LIM)")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)}; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — hit unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, no accepted total exceeds LIM; the drops+tip sum "
           "cannot wrap past the limit check.")

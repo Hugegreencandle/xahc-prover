@@ -12,6 +12,7 @@ Usage: python prove_nospend.py <hook.wasm> [MAX]
 import sys
 import z3
 from prover import Engine
+from soundness import unsound_gate
 
 
 def main(path: str, max_emits: int = 1) -> int:
@@ -36,15 +37,9 @@ def main(path: str, max_emits: int = 1) -> int:
                   f"(policy allows at most {max_emits}) → multiple payouts from one tx.")
             return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove. "
-              f"Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations "
-              "were not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print(f"\n✅ PROVEN — for ALL inputs, no accepting path emits more than {max_emits} "
           f"payment(s). No double-spend / multi-payout.")

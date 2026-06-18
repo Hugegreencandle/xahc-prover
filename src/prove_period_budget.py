@@ -62,6 +62,7 @@ Exit 0 = PROVEN (scoped), 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = N/A.
 import sys
 import z3
 from prover import Engine, feasible
+from soundness import unsound_gate
 
 STATE_KEY = "\x01"   # the fixed 1-byte budget slot key, decoded latin1
 
@@ -183,14 +184,9 @@ def main(path: str) -> int:
         dst_proven = True
 
     # ── fail-closed gates (after the obligations, BEFORE any PROVEN) ─────────
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} reached "
-              f"during analysis; cannot prove. Refusing PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound; deeper iterations were "
-              "not explored. Cannot claim PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
     if not budget_paths:
         print("\n⚠️ INCONCLUSIVE — no accepting path persists the budget slot (key 0x01); "
               "the period-budget property was not exercised. Not PROVEN.")

@@ -59,6 +59,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE / fail-closed, 1 = N/A.
 import sys
 import z3
 from prover import Engine, feasible
+from soundness import unsound_gate
 
 STATE_KEY = "\x01"   # the fixed 1-byte budget slot key, decoded latin1
 W = 128
@@ -213,17 +214,9 @@ def _check_entry(label, e, lim):
 
 def _gates(label, e):
     """Standard fail-closed gates for one engine run (must precede any PROVEN)."""
-    if e.float_overapprox:
-        print(f"\n⚠️ INCONCLUSIVE [{label}] — float op(s) {sorted(e.float_overapprox)} "
-              "over-approximated; not PROVEN.")
-        return 3
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE [{label}] — unsupported opcode(s) {sorted(e.unsupported)} "
-              "reached; not PROVEN.")
-        return 3
-    if e.hit_bound:
-        print(f"\n⚠️ INCONCLUSIVE [{label}] — a loop exceeded the unroll bound; not PROVEN.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
     return None
 
 

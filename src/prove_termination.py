@@ -19,6 +19,7 @@ Usage: python prove_termination.py <hook.wasm>
 import sys
 import z3
 from prover import Engine, feasible
+from soundness import unsound_gate
 
 
 def main(path: str) -> int:
@@ -55,15 +56,9 @@ def main(path: str) -> int:
                 print(f"   {name} = {ev(bs).hex().upper()}")
         return 2
 
-    if e.unsupported:
-        print(f"\n⚠️ INCONCLUSIVE — unsupported opcode(s) {sorted(e.unsupported)} "
-              f"(e.g. br_table / call_indirect) reached during analysis; cannot prove "
-              f"termination. Refusing to claim PROVEN.")
-        return 3
-    if e.hit_bound:
-        print("\n⚠️ INCONCLUSIVE — a loop exceeded the unroll bound before its guard "
-              "tripped; cannot claim termination.")
-        return 3
+    code = unsound_gate(e)
+    if code is not None:
+        return code
 
     print("\n✅ PROVEN — for ALL inputs, no guard is ever crossed past its budget; "
           "the hook can never die with GUARD_VIOLATION.")
