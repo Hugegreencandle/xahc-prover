@@ -25,12 +25,11 @@ Method (sound, reuses prove_time_nonce machinery):
   - DECISION: per accepting path constraint C, substitute every entropy symbol with a fresh primed
     copy (all non-entropy symbols shared). If C can hold yet the primed copy Cp fail for the same
     non-entropy input, the accept decision flips under entropy -> COUNTEREXAMPLE (exact query).
-  - EMITTED money-ROUTING fields: for each emitted native Payment, if its amount, DESTINATION,
-    destination-tag, or source-tag syntactically DEPENDS on an entropy symbol -> COUNTEREXAMPLE
-    (checking the recipient/tags, not just the amount, closes the money-misdirection hole). An emit
-    whose blob is NOT the recognized native template (IOU/custom) FAILS CLOSED -> INCONCLUSIVE (an
-    unmodeled emitted field can never yield a false PROVEN). FLS/LLS carry ledger_seq by design (tx
-    validity bounds) and are intentionally NOT treated as routing fields.
+  - EMITS (v1 scope boundary): proving an emitted txn faithful requires proving EVERY user-observable
+    field is entropy-invariant. A positive allowlist of checked fields is unsound (the next omitted
+    field slips a false PROVEN — audit FP1/FP3/FP4). So v1 FAILS CLOSED: any emit on an accepting
+    path -> INCONCLUSIVE. Complete emit coverage (a field-aware whole-blob check exempting only the
+    protocol-mechanical FLS/LLS/Fee/etxn_details bytes) is deferred to v2 with its own audit.
   - STATE WRITES: if any persisted state write on an accepting path depends on an entropy symbol ->
     COUNTEREXAMPLE. (Syntactic dependence is conservative toward flagging = safe; never a false PROVEN.)
   Fail closed: solver `unknown` / unsupported / hit-bound -> INCONCLUSIVE. No feasible accepting
@@ -100,27 +99,23 @@ def main(path: str) -> int:
                       "on-ledger execution (e.g. a sequence/time deadline). Preview is not faithful.")
                 return 2
 
-    # (2) EMITTED money-ROUTING dependence — a previewed emit's amount, DESTINATION, or TAGS that
-    # varies with entropy (the audit FP-1 caught that checking only Amount let an entropy-chosen
-    # Destination/tag slip through = money misdirection). We check the full routing set, and FAIL
-    # CLOSED on any emit whose blob the engine could not recognize (IOU/unknown template) so an
-    # unmodeled emitted field can never yield a false PROVEN (audit FP-2).
+    # (2) EMITS — v1 scope boundary (FAIL CLOSED). Proving an emitted transaction is preview-faithful
+    # means proving NO user-observable emitted field varies with entropy. Two audit rounds showed a
+    # positive allowlist of checked fields (amount/dest/tags) is UNSOUND BY DESIGN — the next omitted
+    # observable field (Flags, InvoiceID, Memos, …) slips a false PROVEN through (audit FP3/FP4). The
+    # complete fix needs a field-aware whole-blob entropy check that exempts only the protocol-
+    # mechanical fields (FLS/LLS validity window, Fee, host etxn_details) — deferred to v2 with its
+    # own audit. Until then, ANY emit on an accepting path is INCONCLUSIVE: we DO NOT certify the
+    # preview-faithfulness of an emitting hook rather than risk a false PROVEN. (Non-emitting hooks —
+    # accept/reject + state, the guardrail/state-machine class — are fully covered below.)
     for cons, obs_list, emit_count in e.emit_obs_on_accept:
-        n_checked += 1
-        parsed = [o for o in obs_list if o is not None]
-        if emit_count > len(parsed):
-            print("\n⚠️ INCONCLUSIVE — an accepting path emits a transaction whose blob is not the "
-                  "recognized native-Payment template (e.g. an IOU or custom emit); its routing "
-                  "fields can't be checked for entropy dependence. Cannot claim PROVEN (fail-closed).")
+        if emit_count > 0:
+            print("\n⚠️ INCONCLUSIVE — an accepting path EMITS a transaction. v1 proves preview-"
+                  "faithfulness for the accept/reject decision and state writes; certifying that "
+                  "EVERY observable field of an emitted transaction is entropy-invariant needs the "
+                  "v2 field-aware blob check. Refusing to claim PROVEN for an emitting hook "
+                  "(fail-closed).")
             return 3
-        for obs in parsed:
-            fields = [obs["amount"], obs["dtag"], obs["stag"], *obs["dest"]]
-            if any(_depends_on(v, entropy_names) for v in fields):
-                print("\n❌ COUNTEREXAMPLE — an EMITTED transaction's money-routing field "
-                      "(amount / DESTINATION / destination-tag / source-tag) depends on ledger "
-                      "entropy (nonce/seq/last_time): the previewed emit can be re-routed or "
-                      "re-valued at execution. Preview is not faithful.")
-                return 2
 
     # (3) STATE-WRITE dependence — a previewed persisted effect that varies with entropy.
     for code, cons, writes in e.accepts_full:
@@ -141,12 +136,13 @@ def main(path: str) -> int:
     if code is not None:
         return code
 
-    print("\n✅ PROVEN — for ALL inputs, the hook's observable outcome (accept/reject decision, "
-          "emitted transactions, and state writes) is INVARIANT under ledger entropy "
-          "(ledger_nonce / ledger_seq / ledger_last_time). A wallet's pre-sign preview of this "
-          "transaction is a GUARANTEE of the on-ledger effect. (SCOPE: conditional on the hook "
-          "state as read at preview time; a concurrent state change between preview and execution "
-          "is a separate, inherent caveat, not covered.)")
+    print("\n✅ PROVEN — for ALL inputs, the hook's accept/reject DECISION and its STATE WRITES are "
+          "INVARIANT under ledger entropy (ledger_nonce / ledger_seq / ledger_last_time), and this "
+          "hook emits no transaction. A wallet's pre-sign preview of this transaction's "
+          "decision + state effect is a GUARANTEE of the on-ledger result. (SCOPE: v1 covers the "
+          "decision + state writes of NON-emitting hooks; an emitting hook returns INCONCLUSIVE "
+          "pending v2 emit coverage. Conditional on the hook state as read at preview time — a "
+          "concurrent state change between preview and execution is a separate, inherent caveat.)")
     return 0
 
 
