@@ -19,7 +19,7 @@ import sys
 
 from registry import registry as R
 from registry.signing import Signer, load_signer, crypto_available
-from watch.manifest import load_manifest
+from watch.manifest import load_manifest, build_manifest, write_manifest
 
 
 def _emit(obj: dict, as_json: bool, human) -> None:
@@ -72,6 +72,26 @@ def cmd_list(a) -> int:
 
 def cmd_head(a) -> int:
     print(R.head(a.store))
+    return 0
+
+
+def cmd_make_manifest(a) -> int:
+    """Build a ProofManifest JSON from a proven .wasm (fail-closed: non-PROVEN can't be written).
+
+    The prove→manifest→register seam: `xahc author`/CI proves an invariant, then mints the
+    manifest here. exit_code defaults to 0 (PROVEN); a non-zero value is REFUSED by write_manifest.
+    """
+    with open(a.wasm, "rb") as f:
+        wasm = f.read()
+    verdict = a.verdict or ("PROVEN" if a.exit == 0 else "NOT-PROVEN")
+    m = build_manifest(wasm=wasm, invariant=a.invariant, verdict=verdict, exit_code=a.exit,
+                       scope_caveats=a.caveat or [], hook_account=a.account, network_id=a.network)
+    try:
+        write_manifest(m, a.out)
+    except ValueError as ex:
+        print(f"refused: {ex}", file=sys.stderr)
+        return 2
+    print(f"wrote manifest -> {a.out}  ({a.invariant}, hook {m.hook_hash[:12]}…)")
     return 0
 
 
@@ -134,6 +154,11 @@ def main(argv: list[str]) -> int:
     pl = sub.add_parser("list"); pl.add_argument("--json", action="store_true"); pl.set_defaults(fn=cmd_list)
     ph = sub.add_parser("head"); ph.set_defaults(fn=cmd_head)
     pk = sub.add_parser("keygen"); pk.add_argument("--out"); pk.set_defaults(fn=cmd_keygen)
+    pm = sub.add_parser("make-manifest"); pm.add_argument("wasm"); pm.add_argument("--invariant", required=True)
+    pm.add_argument("--exit", type=int, default=0, dest="exit"); pm.add_argument("--verdict")
+    pm.add_argument("--account"); pm.add_argument("--network", type=int)
+    pm.add_argument("--caveat", action="append"); pm.add_argument("--out", required=True)
+    pm.set_defaults(fn=cmd_make_manifest)
 
     a = p.parse_args(argv)
     return a.fn(a)
