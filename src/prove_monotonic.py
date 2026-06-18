@@ -9,26 +9,37 @@ SMALLER value is a replay or rollback vulnerability. The engine models `state`
 something) and `state_set` (records the written value per path); this driver checks
 no accepting path writes a value below what it read.
 
-Usage: python prove_monotonic.py <hook.wasm> [--strict]
+Usage: python prove_monotonic.py <hook.wasm> [--strict] [--field SLOTHEX:OFF:LEN]
   --strict : require STRICTLY increasing (written > old); default is non-decreasing.
+  --field  : check only a byte sub-field of one packed slot (e.g. 01:0:8 = the tick field of a
+             [tick|resource] slot). Default: every written slot's whole value.
 """
 import sys
 import z3
 from prover import Engine, feasible
+from field import parse_field, bv_byte_slice
 
 
-def main(path: str, strict: bool = False) -> int:
+def main(path: str, strict: bool = False, field=None) -> int:
     e = Engine(open(path, "rb").read())
     e.run()
 
     print(f"explored: {len(e.accepts_full)} accepting path(s); "
-          f"state keys written: {sorted({k for _, _, w in e.accepts_full for k in w})}")
+          f"state keys written: {sorted({k for _, _, w in e.accepts_full for k in w})}"
+          + (f"; targeting field {field}" if field else ""))
 
     for code, cons, writes in e.accepts_full:
         # only consider paths that are actually reachable
         if not feasible(cons):
             continue
-        for kn, wval in writes.items():
+        # --field restricts the check to ONE sub-field of ONE slot (a packed next_state where
+        # different byte-fields have different invariants). Default: every written key, whole value.
+        items = writes.items()
+        if field is not None:
+            if field.key not in writes:
+                continue   # this path doesn't persist the targeted slot — nothing to check here
+            items = [(field.key, writes[field.key])]
+        for kn, wval in items:
             old_bytes = e.state_old.get(kn)
             # SOUND: a write to a key that was NEVER read on any path means the
             # hook overwrites persisted state with NO regard for its prior value —
@@ -54,17 +65,27 @@ def main(path: str, strict: bool = False) -> int:
                       f"({old.size() // 8}B); the written and prior values are not "
                       f"comparable, so monotonicity cannot be proven. Not a PROVEN pass.")
                 return 3
+            # When --field is set, compare only the targeted byte sub-field of both values.
+            cmp_w, cmp_o = wval, old
+            if field is not None:
+                try:
+                    cmp_w = bv_byte_slice(wval, field.off, field.length)
+                    cmp_o = bv_byte_slice(old, field.off, field.length)
+                except ValueError as ex:
+                    print(f"\n⚠️ INCONCLUSIVE — {ex}; cannot check the field. Not PROVEN.")
+                    return 3
             # violation = an accepting path that lands the stored value LOWER
-            bad = z3.ULE(wval, old) if strict else z3.ULT(wval, old)
+            bad = z3.ULE(cmp_w, cmp_o) if strict else z3.ULT(cmp_w, cmp_o)
             s = z3.Solver(); s.add(*cons); s.add(bad)
             r = s.check()
             if r == z3.sat:
                 m = s.model()
                 ev = lambda b: m.eval(b, model_completion=True).as_long()
                 rel = "<=" if strict else "<"
-                print(f"\n❌ COUNTEREXAMPLE — accept writes state[{kn}] {rel} its prior value "
+                tgt = f"[{kn!r} field {field.off}:{field.off + field.length}]" if field else f"state[{kn}]"
+                print(f"\n❌ COUNTEREXAMPLE — accept writes {tgt} {rel} its prior value "
                       f"(state moves backwards → replay/rollback):")
-                print(f"   written = {ev(wval)}   prior = {ev(old)}")
+                print(f"   written = {ev(cmp_w)}   prior = {ev(cmp_o)}")
                 return 2
             if r == z3.unknown:
                 # SOUND: Z3 could not decide (timeout/incompleteness). `unknown` is
@@ -91,4 +112,8 @@ def main(path: str, strict: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1], "--strict" in sys.argv[2:]))
+    argv = sys.argv[2:]
+    fld = None
+    if "--field" in argv:
+        fld = parse_field(argv[argv.index("--field") + 1])
+    sys.exit(main(sys.argv[1], "--strict" in argv, fld))

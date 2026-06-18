@@ -195,6 +195,14 @@ def test_matrix_verdicts():
     assert prove_resource_conservation.main(os.path.join(H, "resource_conserve.wasm")) == 0
     assert prove_resource_conservation.main(os.path.join(H, "resource_inflate_bug.wasm")) == 2
     assert prove_resource_conservation.main(os.path.join(H, "resource_mint_capped.wasm")) == 0
+    # --field per-field targeting on a packed [tick|resource] slot (EverArcade enhancement A):
+    from field import parse_field
+    TICK, RES = parse_field("01:0:8"), parse_field("01:8:8")
+    assert prove_monotonic.main(os.path.join(H, "arena_kernel.wasm"), field=TICK) == 0          # tick monotonic-up
+    assert prove_monotonic.main(os.path.join(H, "arena_tick_rollback_bug.wasm"), field=TICK) == 2
+    assert prove_resource_conservation.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 0  # resource conserved
+    assert prove_resource_conservation.main(os.path.join(H, "arena_resource_inflate_bug.wasm"), field=RES) == 2
+    assert prove_monotonic.main(os.path.join(H, "arena_kernel.wasm"), field=RES) == 2            # real targeting: resource not monotonic
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)

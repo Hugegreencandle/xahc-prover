@@ -34,6 +34,7 @@ Exit 0 = PROVEN, 2 = COUNTEREXAMPLE, 3 = INCONCLUSIVE, 1 = N/A.
 import sys
 import z3
 from prover import Engine, feasible
+from field import parse_field, bv_byte_slice
 
 W = 128
 RES_KEY = "\x01"   # the conserved-resource slot (fixed 1-byte key 0x01), latin1
@@ -43,7 +44,7 @@ def z128(x):
     return z3.ZeroExt(W - x.size(), x) if x.size() < W else x
 
 
-def main(path: str) -> int:
+def main(path: str, field=None) -> int:
     e = Engine(open(path, "rb").read())
     e.run()
 
@@ -51,22 +52,27 @@ def main(path: str) -> int:
     mint_bytes = e.inputs.get("param:MINT")
     MINT = z128(z3.Concat(*mint_bytes)) if mint_bytes else z3.BitVecVal(0, W)
 
+    # --field targets a byte sub-field of a packed slot (e.g. 01:8:8 = the resource field of a
+    # [tick|resource] slot); default = the whole 0x01 resource slot.
+    res_key = field.key if field is not None else RES_KEY
+
     # only paths that persist the resource slot are in scope for this obligation.
-    res_writes = [(c, cons, w) for (c, cons, w) in e.accepts_full if RES_KEY in w]
+    res_writes = [(c, cons, w) for (c, cons, w) in e.accepts_full if res_key in w]
     if not res_writes:
-        print(f"N/A — no accepting path persists the resource slot (key 0x{ord(RES_KEY):02x}); "
+        print(f"N/A — no accepting path persists the resource slot (key 0x{ord(res_key):02x}); "
               "the resource-conservation property was not exercised. Not claimed.")
         return 1
 
     print(f"explored: {len(e.accepts_full)} accepting path(s) "
           f"({len(res_writes)} persist the resource slot); "
-          f"MINT cap {'from param' if mint_bytes else '= 0 (pure conservation)'}")
+          f"MINT cap {'from param' if mint_bytes else '= 0 (pure conservation)'}"
+          + (f"; targeting field {field}" if field else ""))
 
     for code, cons, writes in res_writes:
         if not feasible(cons):
             continue
-        wval = writes[RES_KEY]
-        old_bytes = e.state_old.get(RES_KEY)
+        wval = writes[res_key]
+        old_bytes = e.state_old.get(res_key)
         # FAIL CLOSED: an unconditional write (no prior read) creates resource from nothing.
         if not old_bytes:
             print(f"\n❌ COUNTEREXAMPLE — accept writes the resource slot WITHOUT reading its "
@@ -79,11 +85,21 @@ def main(path: str) -> int:
                   f"was {old.size() // 8}B; not comparable, conservation unproven. Not PROVEN.")
             return 3
 
+        # When --field is set, compare only the targeted byte sub-field (the resource sub-field).
+        cmp_w, cmp_o = wval, old
+        if field is not None:
+            try:
+                cmp_w = bv_byte_slice(wval, field.off, field.length)
+                cmp_o = bv_byte_slice(old, field.off, field.length)
+            except ValueError as ex:
+                print(f"\n⚠️ INCONCLUSIVE — {ex}; cannot check the field. Not PROVEN.")
+                return 3
+
         # NEGATION of the invariant: persisted resource' > resource_old + MINT (inflation past
         # the declared mint). 128-bit to avoid wrap masking a real overflow.
         s = z3.Solver(); s.set("timeout", 120000)
         s.add(*cons)
-        s.add(z3.UGT(z128(wval), z128(old) + MINT))
+        s.add(z3.UGT(z128(cmp_w), z128(cmp_o) + MINT))
         r = s.check()
         if r == z3.unknown:
             print(f"\n⚠️ INCONCLUSIVE — solver `unknown` on accept code {code}; not PROVEN.")
@@ -91,9 +107,9 @@ def main(path: str) -> int:
         if r == z3.sat:
             m = s.model(); ev = lambda b: m.eval(b, model_completion=True).as_long()
             print("\n❌ COUNTEREXAMPLE — accept INFLATES the in-world resource beyond the declared mint:")
-            print(f"   prior resource = {ev(z128(old))}   MINT cap = {ev(MINT)}")
-            print(f"   persisted resource' = {ev(z128(wval))}  >  prior + MINT = "
-                  f"{ev(z128(old)) + ev(MINT)}  -> value created from nothing")
+            print(f"   prior resource = {ev(z128(cmp_o))}   MINT cap = {ev(MINT)}")
+            print(f"   persisted resource' = {ev(z128(cmp_w))}  >  prior + MINT = "
+                  f"{ev(z128(cmp_o)) + ev(MINT)}  -> value created from nothing")
             return 2
 
     if e.float_overapprox:
@@ -114,4 +130,6 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    argv = sys.argv[2:]
+    fld = parse_field(argv[argv.index("--field") + 1]) if "--field" in argv else None
+    sys.exit(main(sys.argv[1], fld))
