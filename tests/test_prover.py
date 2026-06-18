@@ -274,6 +274,13 @@ def test_matrix_verdicts():
     # is a spam bypass — checking EVERY accept (not just slot-writers) catches it as CEX.
     assert prove_rate_limit.main(os.path.join(H, "rate_limit_bypass_bug.wasm")) == 2
     assert prove_rate_limit.main(os.path.join(H, "authz.wasm")) == 1
+    # ROOT-INTEGRITY PoC (EverArcade): both protocol obligations on a canonicalizer-shaped kernel —
+    # (1) state_root == HASH(canonical ArenaState) [commitment]; (2) determinism [time-nonce +
+    # preview-faithfulness]. See docs/proofs/ROOT-INTEGRITY-POC.md.
+    assert prove_commitment.main(os.path.join(H, "arena_root_kernel.wasm")) == 0
+    assert prove_commitment.main(os.path.join(H, "arena_root_forge_bug.wasm")) == 2
+    assert prove_time_nonce.main(os.path.join(H, "arena_root_kernel.wasm")) == 0
+    assert prove_preview_faithfulness.main(os.path.join(H, "arena_root_kernel.wasm")) == 0
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
     #   bug -> raw state_set, return ignored -> COUNTEREXAMPLE (2)
