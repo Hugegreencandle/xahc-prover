@@ -48,15 +48,24 @@ def main(path: str) -> int:
 
     origin = e.inputs.get("origin")
     owner = e.inputs.get("hookacc")
-    if not origin or not owner:
-        print("N/A — hook does not read BOTH sfAccount (origin) and hook_account (owner); the "
-              "upgrade-authorization property is not exercised. Not claimed.")
-        return 1
-    not_owner = z3.Or(*[origin[i] != owner[i] for i in range(20)])
 
     repins = [(c, cons, w) for (c, cons, w) in e.accepts_full if SLOT in w]
     print(f"explored: {len(e.accepts_full)} accepting path(s); {len(repins)} persist the boot slot "
           f"0x{ord(SLOT):02x} [version|hash]")
+    if not repins:
+        print(f"N/A — no accepting path re-pins the boot slot (key 0x{ord(SLOT):02x}); the "
+              "upgrade-authorization property is not exercised. Not claimed.")
+        return 1
+    # A hook that RE-PINS but never reads BOTH sfAccount (origin) and hook_account (owner) cannot be
+    # gating the re-pin on authorization at all — it accepts a pin change with no owner check. That
+    # is an UNAUTHORIZED re-pin (COUNTEREXAMPLE), not an un-exercised property (N/A). [fail toward
+    # flagging the danger, not silently sidelining it.]
+    if not origin or not owner:
+        print("\n❌ COUNTEREXAMPLE — the hook re-pins the boot slot WITHOUT reading the originating "
+              "account / hook owner: the pinned boot hash can be changed with NO authorization "
+              "check. Unauthorized upgrade.")
+        return 2
+    not_owner = z3.Or(*[origin[i] != owner[i] for i in range(20)])
 
     n_checked = 0
     for code, cons, writes in repins:

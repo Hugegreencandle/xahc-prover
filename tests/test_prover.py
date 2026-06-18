@@ -242,6 +242,8 @@ def test_matrix_verdicts():
     assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_ok.wasm")) == 0
     assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_noauth_bug.wasm")) == 2
     assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_downgrade_bug.wasm")) == 2
+    # re-pins WITHOUT reading the originator/owner at all -> unauthorized -> CEX (not a misleading N/A)
+    assert prove_boot_upgrade.main(os.path.join(H, "boot_upgrade_noread_bug.wasm")) == 2
     assert prove_boot_upgrade.main(os.path.join(H, "agent_guardrail.wasm")) == 1
     # SC06 UNCHECKED-RETURN (accept ⟹ every failable state_set/emit return was checked):
     #   ok  -> XAHC_STATE_SET (TRY-checked) -> PROVEN (0)
