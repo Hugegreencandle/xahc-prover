@@ -11,7 +11,11 @@ links are already proven for all inputs (xahc-prover):
 regressed. Gate + authz both pass; the boot target is now unsafe. Authorized ≠ safe.
 
 ## The gate that closes it
-A re-pin is only **certified** if the new blob **re-proves the required safety set**:
+A re-pin is only **certified** if the new blob **re-proves the named safety invariant(s) it claims**
+(for an upgrade hook, `boot-upgrade-authz` — owner-only, strictly-monotonic; plus whatever else the
+deployer requires, e.g. `limit`/`authz`). The guarantee is *scoped to the proven invariants*, not a
+claim of total safety — a blob can pass the proven set yet be malicious in an unproven dimension, so
+the invariant set must be chosen to match the risk:
 
 1. **prove** the new blob's invariants (for all inputs, fail-closed).
 2. **register** the proof — a signed entry keyed by the blob's on-chain HookHash. `make-manifest`
@@ -41,4 +45,7 @@ fail-closed certification. Bounded proofs, stated residual, never an unqualified
 ## The layers, together
 `gate` (boot pinned) + `boot-upgrade-authz` (owner-only, forward-only) + **Proof Registry** (only a
 PROVEN blob certifies, signed + re-checkable via `reverify`/`recheck`) + **xahc-watch** (PROOF_VOID
-on deployed≠proven). The bootloader makes code upgradeable; this makes the upgrades *provably safe*.
+on deployed≠proven). The bootloader makes code upgradeable; this makes every upgrade **provably
+consistent with the named invariants** (no unauthorized re-pin, no downgrade, + whatever else is
+required) — re-proven for all inputs, independently re-checkable. Not a claim of total safety; a
+guarantee exactly as strong as the chosen invariant set.
