@@ -2064,6 +2064,32 @@ def test_dsl_float_overapprox_taints_to_inconclusive():
     assert prove_dsl.evaluate(e, ast) == 3   # tainted XFL term -> INCONCLUSIVE, never PROVEN
 
 
+def test_proof_object_solver_free_drat():
+    # solver-free proof objects: QF_BV obligation -> bit-blast -> cadical DRAT -> drat-trim VERIFIED,
+    # with the SMT engine OUT of the loop. Skips if the external checker toolchain isn't installed.
+    import shutil, tempfile, os as _os
+    import proof_object as po
+    have = (shutil.which("cadical") or _os.environ.get("XAHC_CADICAL")) and \
+           (shutil.which("drat-trim") or _os.environ.get("XAHC_DRAT_TRIM"))
+    if not have:
+        print("  (skip test_proof_object_solver_free_drat: cadical/drat-trim not on PATH)")
+        return
+    d = tempfile.mkdtemp()
+    # UNSAT obligation (x < x is never true) -> a verifiable solver-free proof object
+    u = _os.path.join(d, "u.smt2")
+    open(u, "w").write("(declare-fun x () (_ BitVec 8))(assert (bvult x x))(check-sat)\n")
+    r = po.make_and_verify(u, d)
+    assert r["verified"] is True and len(r["drat_sha256"]) == 64
+    # SAT obligation -> the property does NOT hold; must FAIL CLOSED, never produce a "proof"
+    s = _os.path.join(d, "s.smt2")
+    open(s, "w").write("(declare-fun x () (_ BitVec 8))(assert (= x x))(check-sat)\n")
+    try:
+        po.make_and_verify(s, d)
+        assert False, "a SATISFIABLE obligation must not yield a verified proof object"
+    except po.ProofObjectError:
+        pass
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     # also run the read-after-write adversarial suite (separate module, one runner)
