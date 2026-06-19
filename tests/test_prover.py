@@ -28,6 +28,7 @@ import prove_boot_upgrade                                                   # no
 import prove_permissioned_transfer                                          # noqa: E402
 import prove_dst_lock                                                       # noqa: E402
 import prove_rate_limit                                                     # noqa: E402
+import prove_cron                                                           # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -388,6 +389,14 @@ def test_validate_adversarial_no_false_proven():
     # The CORRECT signed check (ret == 8) must PROVE — confirms the driver is not
     # trivially always-CEX (it discriminates correct vs buggy presence checks).
     assert prove_validate.main(os.path.join(H, "adv_validate_signedok.wasm"), "LIM") == 0
+
+
+def test_cron_stacking_bounded():
+    # accept => <= K CronSet (ttCRON_SET=93) emitted per invocation — no unbounded re-arm/stacking.
+    assert prove_cron.main(os.path.join(H, "cron_ok.wasm")) == 0       # re-arms once -> PROVEN (K=1)
+    assert prove_cron.main(os.path.join(H, "cron_bug.wasm")) == 2      # re-arms twice -> COUNTEREXAMPLE
+    assert prove_cron.main(os.path.join(H, "cron_bug.wasm"), 2) == 0   # K=2 -> PROVEN (bound configurable)
+    assert prove_cron.main(os.path.join(H, "emission_ok.wasm")) == 1   # emits Payment, no cron -> N/A
 
 
 def test_overflow_adversarial_catches_wrap():

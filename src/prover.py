@@ -57,7 +57,7 @@ class Terminal(Exception):
 class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
                  "writes_bytes",
-                 "emit_count", "emits", "emits_iou", "emit_obs", "fees", "fsets",
+                 "emit_count", "emits", "emits_iou", "emit_obs", "emit_tts", "fees", "fsets",
                  "reserve_n", "reserve_calls", "mutation_rets")
 
     def __init__(self):
@@ -80,6 +80,9 @@ class Path:
         # {amount, dest(20 bytes), dtag, stag} per emit, or None if the blob isn't the recognized
         # native template (an unrecognized/IOU emit -> the consumer must FAIL CLOSED, never PROVEN).
         self.emit_obs: list = []
+        # per-emit concrete TransactionType (int) of the emitted blob, or None if not concrete.
+        # ttCRON_SET == 93 (0x5D) — lets cron-safety bound the # of CronSet re-arms emitted.
+        self.emit_tts: list = []
         self.fees: list = []      # per-emit base fee (BitVec64) charged to the emitting acct
         self.fsets: list = []     # foreign-state-set events: (acct_bytes|None, granted:Bool, ret)
         # ---- #7 emission-burden (etxn_reserve count) ----
@@ -113,6 +116,7 @@ class Path:
         p.emits = list(self.emits)
         p.emits_iou = list(self.emits_iou)
         p.emit_obs = list(self.emit_obs)
+        p.emit_tts = list(self.emit_tts)
         p.fees = list(self.fees)
         p.fsets = list(self.fsets)
         p.reserve_n = self.reserve_n
@@ -156,6 +160,7 @@ class Engine:
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
         self.emit_obs_on_accept: list = []   # (cons, emit_obs, emit_count) per accepting path
+        self.emit_tts_on_accept: list = []   # (cons, emit_tts, emit_count) per accepting path — cron
         # ---- #7 emission-burden ----
         # Per accepting path: (cons, emit_count:int, reserve_n:BitVec64|None, reserve_calls:int).
         # reserve_n is the declared emit budget from the FIRST etxn_reserve(n) (None = the hook
@@ -676,6 +681,7 @@ class Engine:
             p.emits.append(self._emit_drops(p, rptr))
             p.emits_iou.append(self._emit_iou_xfl(p, rptr))
             p.emit_obs.append(self._emit_observable_native(p, rptr))
+            p.emit_tts.append(self._emit_tx_type(p, rptr))
             # The emitting account also pays the emitted txn's base fee. We charge the SAME
             # SYMBOLIC value `etxn_fee_base` returns (>= host floor 10) — exactly the fee the
             # host deducts and the hook reads/pays. Because the fee ranges over [10, INF), the
@@ -881,6 +887,7 @@ class Engine:
                 self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
                 self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
                 self.emit_obs_on_accept.append((list(p.cons), list(p.emit_obs), p.emit_count))
+                self.emit_tts_on_accept.append((list(p.cons), list(p.emit_tts), p.emit_count))
                 self.fees_on_accept.append((list(p.cons), list(p.fees), p.emit_count))
                 self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))
                 self.emission_on_accept.append(
@@ -994,6 +1001,25 @@ class Engine:
         dtag = z3.Concat(*[self.load_byte(p, rptr + 19 + i) for i in range(4)])
         dest = [self.load_byte(p, rptr + 112 + i) for i in range(20)]
         return {"amount": amt, "dest": dest, "dtag": dtag, "stag": stag}
+
+    def _emit_tx_type(self, p, rptr):
+        """Concrete TransactionType (UInt16) of an emitted blob, or None if not determinable.
+
+        Every emitted tx serializes sfTransactionType FIRST: field id 0x12 at offset 0, then the
+        2-byte big-endian type value at 1..2 (Payment=0x0000, ttCRON_SET=0x005D=93). We return the
+        int only when both the field id and the 2 value bytes are CONCRETE; otherwise None. A None
+        means 'type unknown' and a consumer must fail closed (e.g. count it as a possible CronSet)."""
+        try:
+            fid = self.load_byte(p, rptr)
+            if not self._is_concrete(fid) or self._val(fid) != 0x12:
+                return None
+            hi = self.load_byte(p, rptr + 1)
+            lo = self.load_byte(p, rptr + 2)
+            if not self._is_concrete(hi) or not self._is_concrete(lo):
+                return None
+            return (self._val(hi) << 8) | self._val(lo)
+        except RuntimeError:
+            return None
 
     # ---- the interpreter ----
     def run(self, entry=None):
