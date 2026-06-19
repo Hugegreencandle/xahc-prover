@@ -85,7 +85,8 @@ def cmd_make_manifest(a) -> int:
         wasm = f.read()
     verdict = a.verdict or ("PROVEN" if a.exit == 0 else "NOT-PROVEN")
     m = build_manifest(wasm=wasm, invariant=a.invariant, verdict=verdict, exit_code=a.exit,
-                       scope_caveats=a.caveat or [], hook_account=a.account, network_id=a.network)
+                       scope_caveats=a.caveat or [], hook_account=a.account, network_id=a.network,
+                       prover_args=a.prover_arg or [])
     try:
         write_manifest(m, a.out)
     except ValueError as ex:
@@ -157,7 +158,10 @@ def main(argv: list[str]) -> int:
     pm = sub.add_parser("make-manifest"); pm.add_argument("wasm"); pm.add_argument("--invariant", required=True)
     pm.add_argument("--exit", type=int, default=0, dest="exit"); pm.add_argument("--verdict")
     pm.add_argument("--account"); pm.add_argument("--network", type=int)
-    pm.add_argument("--caveat", action="append"); pm.add_argument("--out", required=True)
+    pm.add_argument("--caveat", action="append")
+    pm.add_argument("--prover-arg", action="append", dest="prover_arg",
+                    help="exact prover driver arg to record for replay (repeatable), e.g. --field 01:0:8")
+    pm.add_argument("--out", required=True)
     pm.set_defaults(fn=cmd_make_manifest)
 
     a = p.parse_args(argv)

@@ -227,10 +227,16 @@ def status_of(hook_hash: str, store: str = DEFAULT_STORE,
     caveats = sorted({c for e in matches for c in e.manifest.get("scope_caveats", [])})
     signed = all(e.signed for e in matches)
     accounts = sorted({e.manifest.get("hook_account") for e in matches if e.manifest.get("hook_account")})
+    # Per-proof detail so a verifier can REPLAY each proof (invariant + the exact prover args).
+    proofs = [{"invariant": e.invariant,
+               "prover_args": list(e.manifest.get("prover_args", [])),
+               "entry": e.index}
+              for e in matches]
     return {
         "status": PROVEN,
         "hook_hash": hook_hash.upper(),
         "invariants": invariants,
+        "proofs": proofs,                    # [{invariant, prover_args, entry}] — for reverify replay
         "residual": caveats,                 # stated residual — the honesty surface
         "signed": signed,                    # all matching entries carry a verified signature
         "hook_accounts": accounts,

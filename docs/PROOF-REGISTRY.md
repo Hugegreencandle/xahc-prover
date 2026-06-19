@@ -41,9 +41,34 @@ xahc registry add proof.json --key attester.key # register a PROVEN manifest (si
 xahc registry check hook.wasm                   # resolve wasm -> HookHash -> status
 xahc registry get <HookHash> --json             # status for a HookHash
 xahc registry verify                            # re-check the whole chain + signatures
+xahc registry reverify hook.wasm               # RE-DERIVE the proofs by re-running the prover
 xahc registry list                              # per-hook rollup + head + integrity
 xahc registry head                              # the head commitment (anchorable)
 ```
+
+## reverify — verify the proof, don't (only) trust the attester
+
+`reverify <hook.wasm>` independently RE-DERIVES every registered proof for that bytecode by
+**re-running the open, deterministic prover** on it (for each registered invariant, with the
+exact `prover_args` recorded in the manifest) and confirming the verdict reproduces.
+
+- All proofs re-derive PROVEN → the attestation holds up (exit 0). You trusted the *open
+  prover*, not the attester.
+- Any proof fails to reproduce → loud **DID NOT REPRODUCE** (exit 2): a tampered record, the
+  wrong bytecode, or a prover change since the proof. (Demonstrated: a hook falsely registered
+  as satisfying an invariant it doesn't is caught here even though its signature/chain are valid.)
+
+**Honest scope.** `reverify` *re-runs the prover* ("re-derive it yourself with the open tool").
+It does NOT yet check a standalone, prover-independent proof object (e.g. a Z3 unsat core) — that
+re-checkable-artifact step is future work. So the trust model is: **integrity + attribution
+(chain + signature) PLUS reproducibility against the open, deterministic prover** — strictly
+stronger than "trust the attester," not yet "verify a proof term with zero trust." `prover_args`
+is recorded per manifest precisely so the re-derivation is faithful.
+
+> Caveat: a pre-v2 manifest (made before `prover_args` existed) records no args. If such a proof
+> actually needed prover args (e.g. `--field`), `reverify` re-runs without them and will report
+> **DID NOT REPRODUCE** — this fails *safe* (it never falsely passes; it conservatively flags).
+> Re-mint the manifest with `make-manifest --prover-arg …` to restore faithful reverify.
 
 (Equivalently `python -m registry <cmd>` from the prover, with `src/` on `PYTHONPATH`.)
 Store path defaults to `./proof-registry.jsonl` or `$XAHC_REGISTRY`; key may come from

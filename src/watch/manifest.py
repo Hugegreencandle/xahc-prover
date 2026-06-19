@@ -24,7 +24,7 @@ import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 PROVEN_EXIT = 0
 
 
@@ -56,6 +56,7 @@ class ProofManifest:
     hook_hash: str                       # Xahau HookHash (SHA-512Half) of the proven bytecode
     wasm_sha256: str                     # file checksum (audit aid)
     params: dict = field(default_factory=dict)        # e.g. {"LIM": 5000000, "DST": "<20-byte hex>"}
+    prover_args: list = field(default_factory=list)    # exact prover driver args (e.g. ["--field","01:0:8"]) — replay for reverify
     scope_caveats: list = field(default_factory=list)  # e.g. ["cbak present", "INCONCLUSIVE region: ..."]
     hook_account: Optional[str] = None   # bound r-address (optional until bound to a deployment)
     network_id: Optional[int] = None     # e.g. 21338 (testnet)
@@ -70,6 +71,7 @@ class ProofManifest:
 def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
                    params: Optional[dict] = None, scope_caveats: Optional[list] = None,
                    hook_account: Optional[str] = None, network_id: Optional[int] = None,
+                   prover_args: Optional[list] = None,
                    created_at: Optional[str] = None) -> ProofManifest:
     return ProofManifest(
         invariant=invariant,
@@ -78,6 +80,7 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
         hook_hash=hook_hash_of(wasm),
         wasm_sha256=wasm_sha256_of(wasm),
         params=dict(params or {}),
+        prover_args=list(prover_args or []),
         scope_caveats=list(scope_caveats or []),
         hook_account=hook_account,
         network_id=network_id,

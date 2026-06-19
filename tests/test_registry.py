@@ -205,6 +205,20 @@ def test_injected_non_proven_entry_is_caught_on_read():
     print(f"  ok: injected non-PROVEN entry caught on read -> {reason[:48]}…")
 
 
+def test_prover_args_roundtrip_for_reverify():
+    """prover_args are recorded + surfaced per-proof so `reverify` can replay each proof exactly."""
+    store = _tmp()
+    m = _manifest(WASM_A, "monotonic")
+    m.prover_args = ["--field", "01:0:8"]
+    R.add(m, store)
+    out = R.status_of(hook_hash_of(WASM_A), store)
+    assert out["status"] == R.PROVEN, out
+    proofs = out.get("proofs", [])
+    assert proofs and proofs[0]["invariant"] == "monotonic", out
+    assert proofs[0]["prover_args"] == ["--field", "01:0:8"], proofs
+    print("  ok: prover_args recorded + surfaced per-proof (reverify can replay)")
+
+
 def test_float_in_manifest_refused():
     """AUDIT (MED fix): a manifest carrying a float has no stable hash domain — refuse it."""
     store = _tmp()
