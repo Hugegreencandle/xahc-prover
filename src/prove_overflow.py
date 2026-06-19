@@ -20,6 +20,7 @@ import sys
 import z3
 from prover import Engine
 from soundness import unsound_gate
+from smt_export import emit_query
 
 W = 128
 
@@ -56,6 +57,7 @@ def main(path: str) -> int:
             print(f"   true (drops+tip) = {ev(true_total)}  >  LIM = {ev(limv)}  "
                   f"(the 64-bit sum wrapped below LIM)")
             return 2
+        emit_query(s, "overflow")  # unsat here: path proven — record the obligation
 
     code = unsound_gate(e)
     if code is not None:

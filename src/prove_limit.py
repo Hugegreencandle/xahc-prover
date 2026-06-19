@@ -9,6 +9,7 @@ import sys
 import z3
 from prover import Engine
 from soundness import unsound_gate
+from smt_export import emit_query
 
 
 def main(path: str, max_drops: int | None = None) -> int:
@@ -54,6 +55,7 @@ def main(path: str, max_drops: int | None = None) -> int:
             print(f"   sfAmount bytes = {bytes(av).hex().upper()}")
             print(f"   LIM param bytes = {bytes(lv).hex().upper()}")
             return 2
+        emit_query(s, "limit")  # unsat here: this path is proven — record the obligation
 
     code = unsound_gate(e)
     if code is not None:

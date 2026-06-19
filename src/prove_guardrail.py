@@ -13,6 +13,7 @@ import sys
 import z3
 from prover import Engine
 from soundness import unsound_gate
+from smt_export import emit_query
 from watch.predicates import decode_drops, over_limit, dest_not_allowed, Z3Ops
 
 
@@ -65,6 +66,7 @@ def main(path: str, max_drops: int | None = None) -> int:
             print(f"   accept code {code}: drops={dv} > LIM={lvv}")
             print(f"   sfAmount bytes = {av.hex().upper()}   LIM = {lv.hex().upper()}")
             return 2
+        emit_query(s, "guardrail", "spendlimit")  # unsat: path proven — record obligation
 
     # ── invariant 2: destination allowlist (the DST lock) ───────────────────
     #   (accept AND outgoing Payment AND DST policy set)  =>  dest == allowed
@@ -94,6 +96,7 @@ def main(path: str, max_drops: int | None = None) -> int:
                 print("\n❌ COUNTEREXAMPLE [dst-lock] — guardrail ACCEPTS a payment to a non-allowed destination:")
                 print(f"   accept code {code}: Destination={dv.hex().upper()}  allowed(DST)={lvv.hex().upper()}")
                 return 2
+            emit_query(s, "guardrail", "dstlock")  # unsat: path proven — record obligation
         dst_proven = True
     else:
         dst_proven = False   # hook reads no DST param — lock invariant N/A

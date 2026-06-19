@@ -70,6 +70,43 @@ is recorded per manifest precisely so the re-derivation is faithful.
 > **DID NOT REPRODUCE** — this fails *safe* (it never falsely passes; it conservatively flags).
 > Re-mint the manifest with `make-manifest --prover-arg …` to restore faithful reverify.
 
+## recheck — re-solve the proof obligations with YOUR solver (v2)
+
+A driver proves `accept ⟹ P` by checking each accepting path's violation query
+`path ∧ ¬P` is **UNSAT**. With `XAHC_EMIT_SMT=<dir>` set, the prover exports each of those exact
+queries as SMT-LIB2. `recheck` re-solves every file and requires `unsat`:
+
+```sh
+# 1) export the obligations while proving (gated by the env var)
+XAHC_EMIT_SMT=./obligations xahc prove hook.wasm --invariant guardrail
+# 2) re-solve them with an independent solver — does NOT run the xahc engine
+xahc registry recheck ./obligations               # default z3
+xahc registry recheck ./obligations --solver cvc5 # cross-solver (if cvc5 installed)
+```
+
+This is **stronger than `reverify`**: reverify re-runs *our* engine; recheck re-solves the
+emitted formulas with *any* SMT solver, so you trust your solver (and our open encoder), not our
+run or our solver. Cross-solver agreement (z3 *and* cvc5) is genuine independence. Fail-closed:
+any obligation that is not `unsat` (sat, unknown, parse error, missing solver, empty bundle) fails
+the recheck (exit 2).
+
+**Bind the artifact to a proof.** `make-manifest --smt <dir>` records the bundle's sha256
+(`smt_sha256`); `recheck --expect-sha256 <hash>` then confirms you are re-solving the *same*
+obligations that were registered, not a substituted easy-to-satisfy set.
+
+**Honest scope.** recheck removes trust in our *solver*. The residual is trust in the open
+*encoder* (the symbolic execution that produced the formulas from the bytecode) — closing that
+needs an independent/verified encoder (future). Completeness is part of that residual: recheck
+certifies that the obligations **in the bundle** are unsat; it trusts the encoder emitted one per
+accepting path. Post-registration deletion/substitution is caught by `smt_sha256` binding. So the trust ladder is:
+
+| Rung | you trust | shipped |
+|---|---|---|
+| `verify` | the attester's key | ✓ |
+| `reverify` | our open, deterministic engine (you re-run it) | ✓ |
+| `recheck` (v2) | any SMT solver + our open encoder (not our run, not our solver) | ✓ |
+| verified encoder | a tiny checker only | future |
+
 (Equivalently `python -m registry <cmd>` from the prover, with `src/` on `PYTHONPATH`.)
 Store path defaults to `./proof-registry.jsonl` or `$XAHC_REGISTRY`; key may come from
 `--key` or `$XAHC_REGISTRY_KEY`.

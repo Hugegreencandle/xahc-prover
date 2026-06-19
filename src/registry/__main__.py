@@ -18,7 +18,9 @@ import json
 import sys
 
 from registry import registry as R
+from registry.recheck import recheck_dir
 from registry.signing import Signer, load_signer, crypto_available
+from smt_export import bundle_sha256
 from watch.manifest import load_manifest, build_manifest, write_manifest
 
 
@@ -84,9 +86,10 @@ def cmd_make_manifest(a) -> int:
     with open(a.wasm, "rb") as f:
         wasm = f.read()
     verdict = a.verdict or ("PROVEN" if a.exit == 0 else "NOT-PROVEN")
+    smt_sha = bundle_sha256(a.smt) if a.smt else None
     m = build_manifest(wasm=wasm, invariant=a.invariant, verdict=verdict, exit_code=a.exit,
                        scope_caveats=a.caveat or [], hook_account=a.account, network_id=a.network,
-                       prover_args=a.prover_arg or [])
+                       prover_args=a.prover_arg or [], smt_sha256=smt_sha)
     try:
         write_manifest(m, a.out)
     except ValueError as ex:
@@ -113,6 +116,26 @@ def cmd_keygen(a) -> int:
         print(f"seed (secret): {seed}")
         print(f"public key:    {pub}")
     return 0
+
+
+def cmd_recheck(a) -> int:
+    """Re-solve the exported SMT obligations with an independent solver (verify-the-proof v2)."""
+    res = recheck_dir(a.smt_dir, solver=a.solver, expect_sha256=a.expect_sha256)
+    _emit(res, a.json, _print_recheck)
+    return 0 if res.get("ok") else 2
+
+
+def _print_recheck(o: dict) -> None:
+    if not o.get("results"):
+        print(f"✗ RECHECK FAILED: {o.get('reason', 'no obligations')}")
+        return
+    for r in o["results"]:
+        print(f"  {'✓' if r['ok'] else '✗'} {r['file']}  -> {r['verdict']}")
+    if o.get("ok"):
+        print(f"\n✓ all {len(o['results'])} obligation(s) re-solved UNSAT with {o['solver']} "
+              f"— independently re-checked; the xahc engine was NOT run.")
+    else:
+        print(f"\n✗ recheck FAILED — not every obligation re-solved unsat. {o.get('reason', '')}")
 
 
 def _print_status(o: dict) -> None:
@@ -161,8 +184,14 @@ def main(argv: list[str]) -> int:
     pm.add_argument("--caveat", action="append")
     pm.add_argument("--prover-arg", action="append", dest="prover_arg",
                     help="exact prover driver arg to record for replay (repeatable), e.g. --field 01:0:8")
+    pm.add_argument("--smt", help="dir of exported .smt2 obligations; records its bundle sha256 for recheck")
     pm.add_argument("--out", required=True)
     pm.set_defaults(fn=cmd_make_manifest)
+    prc = sub.add_parser("recheck"); prc.add_argument("smt_dir")
+    prc.add_argument("--solver", default="z3", choices=["z3", "cvc5"])
+    prc.add_argument("--expect-sha256", dest="expect_sha256",
+                     help="require the bundle to match this sha256 (bind to a registered artifact)")
+    prc.add_argument("--json", action="store_true"); prc.set_defaults(fn=cmd_recheck)
 
     a = p.parse_args(argv)
     return a.fn(a)

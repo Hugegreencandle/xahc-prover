@@ -219,6 +219,56 @@ def test_prover_args_roundtrip_for_reverify():
     print("  ok: prover_args recorded + surfaced per-proof (reverify can replay)")
 
 
+def test_recheck_unsat_passes_sat_and_empty_fail():
+    """verify-the-proof v2: recheck re-solves SMT obligations; ONLY all-unsat passes (fail-closed)."""
+    from registry.recheck import recheck_dir
+    from smt_export import bundle_sha256
+    import tempfile
+    d = tempfile.mkdtemp()
+    # a genuinely UNSAT obligation
+    open(os.path.join(d, "ok-0.smt2"), "w").write(
+        "(declare-const x (_ BitVec 8))\n(assert (bvugt x #x05))\n(assert (bvult x #x03))\n(check-sat)\n")
+    res = recheck_dir(d, "z3")
+    assert res["ok"] and res["results"][0]["verdict"] == "unsat", res
+    print("  ok: recheck passes an all-unsat bundle")
+
+    # add a SAT obligation -> recheck must FAIL (a satisfiable violation = the proof is broken)
+    open(os.path.join(d, "bad-0.smt2"), "w").write(
+        "(declare-const x (_ BitVec 8))\n(assert (bvugt x #x05))\n(check-sat)\n")
+    assert not recheck_dir(d, "z3")["ok"], "recheck must fail when any obligation is sat"
+    print("  ok: recheck fails closed on a sat obligation")
+
+    # empty bundle is NOT a pass
+    empty = tempfile.mkdtemp()
+    assert not recheck_dir(empty, "z3")["ok"], "empty bundle must not pass"
+    # sha256 binding: wrong expected hash fails
+    assert not recheck_dir(d, "z3", expect_sha256="DEAD")["ok"], "sha mismatch must fail"
+    assert bundle_sha256(d) == bundle_sha256(d), "bundle hash must be deterministic"
+    print("  ok: empty bundle + sha256-mismatch both fail closed")
+
+
+def test_smt_emit_round_trips_and_binds_to_manifest():
+    """emit_query writes obligations only when XAHC_EMIT_SMT set; bundle hash binds to a manifest."""
+    from smt_export import emit_query, bundle_sha256, reset
+    import tempfile, z3
+    reset()
+    d = tempfile.mkdtemp()
+    os.environ["XAHC_EMIT_SMT"] = d
+    try:
+        s = z3.Solver(); x = z3.BitVec("x", 8)
+        s.add(z3.UGT(x, z3.BitVecVal(5, 8)), z3.ULT(x, z3.BitVecVal(3, 8)))  # unsat
+        assert s.check() == z3.unsat
+        emit_query(s, "limit")
+    finally:
+        del os.environ["XAHC_EMIT_SMT"]
+    files = [f for f in os.listdir(d) if f.endswith(".smt2")]
+    assert files == ["limit-path-0.smt2"], files
+    # the hash can be recorded in a manifest and surfaced
+    m = _manifest(WASM_A, "limit"); m.smt_sha256 = bundle_sha256(d)
+    assert len(m.smt_sha256) == 64
+    print("  ok: emit_query round-trips (env-gated) + bundle hash binds to manifest")
+
+
 def test_float_in_manifest_refused():
     """AUDIT (MED fix): a manifest carrying a float has no stable hash domain — refuse it."""
     store = _tmp()

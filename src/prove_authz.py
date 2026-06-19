@@ -15,6 +15,7 @@ import sys
 import z3
 from prover import Engine
 from soundness import unsound_gate
+from smt_export import emit_query
 
 
 def main(path: str) -> int:
@@ -48,6 +49,7 @@ def main(path: str) -> int:
             print(f"   originating account = {ov.hex().upper()}")
             print(f"   hook owner          = {mv.hex().upper()}")
             return 2
+        emit_query(s, "authz")  # unsat here: path proven — record the obligation
 
     code = unsound_gate(e)
     if code is not None:
