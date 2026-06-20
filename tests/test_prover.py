@@ -32,6 +32,7 @@ import prove_cron                                                           # no
 import prove_partial_payment                                                # noqa: E402
 import prove_native_amount                                                  # noqa: E402
 import prove_emit_budget                                                    # noqa: E402
+import prove_emit_dst_lock                                                  # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -426,6 +427,14 @@ def test_emit_budget_safety():
     assert prove_emit_budget.main(os.path.join(H, "subscription_ok.wasm")) == 0              # capped -> PROVEN
     assert prove_emit_budget.main(os.path.join(H, "subscription_overspend_bug.wasm")) == 2   # no cap gate -> CEX
     assert prove_emit_budget.main(os.path.join(H, "authz.wasm")) == 1                        # no CAP/emit -> N/A
+
+
+def test_emit_dst_lock_safety():
+    # accept => every emitted Payment goes ONLY to the locked payee PAY — an autonomous Hook can't be
+    # made to pay any other address. Pairs with emit-budget to fully certify a subscription's safety.
+    assert prove_emit_dst_lock.main(os.path.join(H, "subscription_ok.wasm")) == 0            # pays PAY -> PROVEN
+    assert prove_emit_dst_lock.main(os.path.join(H, "subscription_wrongdst_bug.wasm")) == 2  # pays attacker -> CEX
+    assert prove_emit_dst_lock.main(os.path.join(H, "authz.wasm")) == 1                      # no PAY/emit -> N/A
 
 
 def test_cron_stacking_bounded():
