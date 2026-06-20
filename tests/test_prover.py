@@ -34,6 +34,7 @@ import prove_native_amount                                                  # no
 import prove_emit_budget                                                    # noqa: E402
 import prove_emit_dst_lock                                                  # noqa: E402
 import prove_trigger_lock                                                   # noqa: E402
+import prove_time_release                                                   # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -444,6 +445,14 @@ def test_trigger_lock_safety():
     assert prove_trigger_lock.main(os.path.join(H, "subscription_ok.wasm")) == 0              # gated -> PROVEN
     assert prove_trigger_lock.main(os.path.join(H, "subscription_anytrigger_bug.wasm")) == 2  # no gate -> CEX
     assert prove_trigger_lock.main(os.path.join(H, "authz.wasm")) == 1                        # no emit -> N/A
+
+
+def test_time_release_safety():
+    # accept-with-emit => ledger_last_time >= CLIFF: a vesting Hook releases NOTHING before its cliff.
+    # The new invariant unlocking the scheduled-release family (cliff/tranche, not nonlinear-continuous).
+    assert prove_time_release.main(os.path.join(H, "vesting_ok.wasm")) == 0          # cliff-gated -> PROVEN
+    assert prove_time_release.main(os.path.join(H, "vesting_early_bug.wasm")) == 2   # no time gate -> CEX
+    assert prove_time_release.main(os.path.join(H, "subscription_ok.wasm")) == 1     # no CLF param -> N/A
 
 
 def test_cron_stacking_bounded():
