@@ -37,6 +37,11 @@ sys.path.insert(0, SRC)
 
 VERDICT = {0: "PROVEN", 1: "N/A", 2: "COUNTEREXAMPLE", 3: "INCONCLUSIVE"}
 
+# --fast: skip the z3-nonlinear / external-checker drivers (seconds each) so a pre-push gate is near
+# instant. These keep full coverage in the default (async/scheduled) run; their bug fixtures still
+# fail-closed there. NEVER skip a driver whose ONLY known-unsafe coverage lives in the slow path.
+SLOW_DRIVERS = {"constant_product"}
+
 # prove_<driver>.main(os.path.join(H, "<wasm>")[, <extra args>]) == <expected>
 CASE_RE = re.compile(
     r'prove_(\w+)\.main\(\s*os\.path\.join\(H,\s*"([^"]+\.wasm)"\)\s*(?:,\s*([^)]*?))?\)\s*==\s*(\d)'
@@ -51,6 +56,12 @@ def parse_corpus(test_path: str):
             driver, wasm, extra, exp = m.group(1), m.group(2), (m.group(3) or "").strip(), int(m.group(4))
             cases.append((driver, wasm, extra, exp))
     return cases
+
+
+def _worker(case):
+    """Pool worker: run one labelled case, return (driver, wasm, extra, expected, actual)."""
+    driver, wasm, extra, exp = case
+    return (driver, wasm, extra, exp, run_case(driver, wasm, extra))
 
 
 def run_case(driver: str, wasm: str, extra: str) -> int:
@@ -82,7 +93,10 @@ def main():
     if "--report-dir" in sys.argv:
         report_dir = sys.argv[sys.argv.index("--report-dir") + 1]
 
+    fast = "--fast" in sys.argv
     cases = parse_corpus(TESTS)
+    if fast:
+        cases = [c for c in cases if c[0] not in SLOW_DRIVERS]
     if not cases:
         print("ERROR: parsed 0 cases from the test suite — corpus empty, refusing to claim sound.")
         return 3
@@ -95,8 +109,17 @@ def main():
     skipped = []         # harness can't eval test-local args (full suite still covers these)
     ok = 0
 
-    for driver, wasm, extra, exp in cases:
-        act = run_case(driver, wasm, extra)
+    # Parallel: each case is an independent symbolic-execution run -> a process pool cuts the wall
+    # clock ~Ncores. Determinism is unaffected (each case is pure). Serial fallback on any pool error.
+    try:
+        import multiprocessing as mp
+        nproc = max(2, (os.cpu_count() or 4) - 2)
+        with mp.Pool(nproc) as pool:
+            results = pool.map(_worker, cases)
+    except Exception:
+        results = [_worker(c) for c in cases]
+
+    for driver, wasm, extra, exp, act in results:
         if act == -1:
             missing.append((driver, wasm)); continue
         if act == -2:
