@@ -31,6 +31,7 @@ import prove_rate_limit                                                     # no
 import prove_cron                                                           # noqa: E402
 import prove_partial_payment                                                # noqa: E402
 import prove_native_amount                                                  # noqa: E402
+import prove_emit_budget                                                    # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -417,6 +418,14 @@ def test_native_amount_safety():
     assert prove_native_amount.main(os.path.join(H, "native_amount_ok.wasm")) == 0   # rejects issued -> PROVEN
     assert prove_native_amount.main(os.path.join(H, "native_amount_bug.wasm")) == 2  # masks 0x3F, ignores 0x80 -> CEX
     assert prove_native_amount.main(os.path.join(H, "authz.wasm")) == 1              # not amount-gated -> N/A
+
+
+def test_emit_budget_safety():
+    # accept => cumulative EMITTED spend stays within CAP — the first invariant over a Hook's outgoing
+    # autonomous spend (Cron-fired subscription). C1 no-overspend + C2 honest-record => cumulative <= CAP.
+    assert prove_emit_budget.main(os.path.join(H, "subscription_ok.wasm")) == 0              # capped -> PROVEN
+    assert prove_emit_budget.main(os.path.join(H, "subscription_overspend_bug.wasm")) == 2   # no cap gate -> CEX
+    assert prove_emit_budget.main(os.path.join(H, "authz.wasm")) == 1                        # no CAP/emit -> N/A
 
 
 def test_cron_stacking_bounded():
