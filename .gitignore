@@ -6,3 +6,13 @@ hooks/*.raw.wasm
 # the small hook .wasm fixtures ARE tracked — they're what the prover proves
 # against, and not every machine has a wasm32-capable clang to rebuild them.
 !hooks/*.wasm
+
+# --- private deliverables / secrets (NEVER commit) ---
+# Customer certifications are NDA artifacts (the paid deliverable), not public repo content.
+attestations/
+# Attester / signing keys — secret. Only the PUBLIC key is ever shared.
+*.key
+*.seed
+attester*.key
+# Per-cert registry stores written alongside attestations.
+**/attestations/**/registry.jsonl
