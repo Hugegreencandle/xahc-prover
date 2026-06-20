@@ -2108,6 +2108,24 @@ def test_proof_object_solver_free_drat():
         pass
 
 
+def test_artifact_anchor_manifest():
+    # cross-domain anchor: Xahau auto-populates {xahau.hook_hash, <hook_hash>}; a non-WASM artifact
+    # (e.g. Ward's resolver) carries its own anchor_type/value through the SAME manifest/registry.
+    import tempfile, os as _os
+    from watch.manifest import build_manifest, build_anchor_manifest, write_manifest, load_manifest
+    m = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0,
+                       hook_account="rABC", network_id=21338)
+    assert m.artifact_anchor["anchor_type"] == "xahau.hook_hash"
+    assert m.artifact_anchor["value"] == m.hook_hash            # anchor value == the registry key
+    w = build_anchor_manifest(anchor_type="xrpl.code_hash", anchor_value="DEADBEEF",
+                              invariant="nine-check", verdict="PROVEN", exit_code=0, reducer="ward-resolver")
+    assert w.artifact_anchor["anchor_type"] == "xrpl.code_hash" and w.hook_hash == "DEADBEEF"
+    d = tempfile.mkdtemp()
+    for mm, nm in [(m, "x.json"), (w, "w.json")]:
+        p = _os.path.join(d, nm); write_manifest(mm, p)
+        assert load_manifest(p).artifact_anchor == mm.artifact_anchor   # round-trips
+
+
 def test_proof_object_registry_binding():
     # bind a verified solver-free proof-object bundle into a manifest; checkproof matches it.
     import shutil, tempfile, os as _os

@@ -24,8 +24,22 @@ import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 PROVEN_EXIT = 0
+
+
+def make_anchor(anchor_type: str, value: str, account: Optional[str] = None,
+                network_id: Optional[int] = None) -> dict:
+    """A domain-neutral deployment anchor (the cross-domain re-check format). `anchor_type` names the
+    KIND of on-chain identifier a verifier recomputes from the deployed artifact and compares; `value`
+    is that hash/id. Examples: xahau.hook_hash (SHA-512Half of the WASM), xrpl.code_hash,
+    xrpl.ledger_object, evm.code_hash. The binding only needs: a stable id a consumer can recompute."""
+    a = {"anchor_type": anchor_type, "value": value}
+    if account is not None:
+        a["account"] = account
+    if network_id is not None:
+        a["network_id"] = network_id
+    return a
 
 
 def hook_hash_of(wasm: bytes) -> str:
@@ -59,6 +73,11 @@ class ProofManifest:
     prover_args: list = field(default_factory=list)    # exact prover driver args (e.g. ["--field","01:0:8"]) — replay for reverify
     smt_sha256: Optional[str] = None                    # bundle hash of the exported SMT obligations — recheck binding
     proof_object_sha256: Optional[str] = None           # bundle hash of the verified solver-free DRAT proof objects — checkproof binding
+    # Domain-neutral deployment anchor {anchor_type, value, account?, network_id?}. For Xahau this is
+    # {xahau.hook_hash, <hook_hash>}; for a non-Xahau artifact (e.g. Ward's resolver) it carries that
+    # artifact's id. `hook_hash` stays the registry key (= the anchor value); this makes the manifest
+    # self-describing + cross-domain. (v3.)
+    artifact_anchor: Optional[dict] = None
     scope_caveats: list = field(default_factory=list)  # e.g. ["cbak present", "INCONCLUSIVE region: ..."]
     hook_account: Optional[str] = None   # bound r-address (optional until bound to a deployment)
     network_id: Optional[int] = None     # e.g. 21338 (testnet)
@@ -76,18 +95,49 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
                    prover_args: Optional[list] = None, smt_sha256: Optional[str] = None,
                    proof_object_sha256: Optional[str] = None,
                    created_at: Optional[str] = None) -> ProofManifest:
+    hh = hook_hash_of(wasm)
     return ProofManifest(
         invariant=invariant,
         verdict=verdict,
         exit_code=exit_code,
-        hook_hash=hook_hash_of(wasm),
+        hook_hash=hh,
         wasm_sha256=wasm_sha256_of(wasm),
         params=dict(params or {}),
         prover_args=list(prover_args or []),
         smt_sha256=smt_sha256,
         proof_object_sha256=proof_object_sha256,
+        artifact_anchor=make_anchor("xahau.hook_hash", hh, hook_account, network_id),
         scope_caveats=list(scope_caveats or []),
         hook_account=hook_account,
+        network_id=network_id,
+        prover_commit=_prover_commit(),
+        created_at=created_at,
+    )
+
+
+def build_anchor_manifest(*, anchor_type: str, anchor_value: str, invariant: str, verdict: str,
+                          exit_code: int, params: Optional[dict] = None,
+                          scope_caveats: Optional[list] = None, account: Optional[str] = None,
+                          network_id: Optional[int] = None, prover_args: Optional[list] = None,
+                          smt_sha256: Optional[str] = None, proof_object_sha256: Optional[str] = None,
+                          reducer: Optional[str] = None, created_at: Optional[str] = None) -> ProofManifest:
+    """Build a manifest for a NON-WASM artifact (cross-domain — e.g. Ward's resolver code hash, an
+    on-ledger object id). `hook_hash` is set to `anchor_value` so the SAME registry keys/looks it up;
+    `artifact_anchor.anchor_type` says what KIND of anchor it is. The verifier recomputes anchor_value
+    from the deployed artifact and compares — identical re-check discipline, different domain."""
+    return ProofManifest(
+        invariant=invariant,
+        verdict=verdict,
+        exit_code=exit_code,
+        hook_hash=anchor_value.upper() if anchor_type == "xahau.hook_hash" else anchor_value,
+        wasm_sha256="",                       # no WASM file for a non-Hook artifact
+        params=dict(params or {}),
+        prover_args=list(prover_args or ([] if reducer is None else [f"reducer={reducer}"])),
+        smt_sha256=smt_sha256,
+        proof_object_sha256=proof_object_sha256,
+        artifact_anchor=make_anchor(anchor_type, anchor_value, account, network_id),
+        scope_caveats=list(scope_caveats or []),
+        hook_account=account,
         network_id=network_id,
         prover_commit=_prover_commit(),
         created_at=created_at,
