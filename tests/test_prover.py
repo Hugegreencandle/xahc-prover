@@ -33,6 +33,7 @@ import prove_partial_payment                                                # no
 import prove_native_amount                                                  # noqa: E402
 import prove_emit_budget                                                    # noqa: E402
 import prove_emit_dst_lock                                                  # noqa: E402
+import prove_trigger_lock                                                   # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -435,6 +436,14 @@ def test_emit_dst_lock_safety():
     assert prove_emit_dst_lock.main(os.path.join(H, "subscription_ok.wasm")) == 0            # pays PAY -> PROVEN
     assert prove_emit_dst_lock.main(os.path.join(H, "subscription_wrongdst_bug.wasm")) == 2  # pays attacker -> CEX
     assert prove_emit_dst_lock.main(os.path.join(H, "authz.wasm")) == 1                      # no PAY/emit -> N/A
+
+
+def test_trigger_lock_safety():
+    # accept-with-emit => otxn_type == ttCRON (92): a Cron autonomous Hook emits ONLY on its own cron
+    # fire, never when an arbitrary tx touches the account (no non-owner-triggered payment).
+    assert prove_trigger_lock.main(os.path.join(H, "subscription_ok.wasm")) == 0              # gated -> PROVEN
+    assert prove_trigger_lock.main(os.path.join(H, "subscription_anytrigger_bug.wasm")) == 2  # no gate -> CEX
+    assert prove_trigger_lock.main(os.path.join(H, "authz.wasm")) == 1                        # no emit -> N/A
 
 
 def test_cron_stacking_bounded():
