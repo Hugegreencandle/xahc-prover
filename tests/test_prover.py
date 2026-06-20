@@ -30,6 +30,7 @@ import prove_dst_lock                                                       # no
 import prove_rate_limit                                                     # noqa: E402
 import prove_cron                                                           # noqa: E402
 import prove_partial_payment                                                # noqa: E402
+import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -390,6 +391,14 @@ def test_validate_adversarial_no_false_proven():
     # The CORRECT signed check (ret == 8) must PROVE — confirms the driver is not
     # trivially always-CEX (it discriminates correct vs buggy presence checks).
     assert prove_validate.main(os.path.join(H, "adv_validate_signedok.wasm"), "LIM") == 0
+
+
+def test_constant_product_no_drain():
+    # AMM no-drain: accept => newRX*newRY >= oldRX*oldRY (constant product can't decrease).
+    # PROVEN in the native-product regime; CEX catches a drain at full width; N/A for non-AMM hooks.
+    assert prove_constant_product.main(os.path.join(H, "amm_swap.wasm")) == 0       # k-guarded -> PROVEN
+    assert prove_constant_product.main(os.path.join(H, "amm_swap_bug.wasm")) == 2   # no guard -> drain CEX
+    assert prove_constant_product.main(os.path.join(H, "authz.wasm")) == 1          # no reserves -> N/A
 
 
 def test_partial_payment_safety():

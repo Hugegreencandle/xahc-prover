@@ -157,6 +157,10 @@ class Engine:
         self.rollbacks: list = []    # (code, cons)
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
+        # keys whose state_old was OVERWRITTEN by a wider later read (the prior-value symbols a path
+        # saw may differ from the final state_old) — invariants that pair old-vs-new per slot must
+        # fail-closed on these (the prior model is ambiguous). Populated by the `state` handler.
+        self.state_old_overwritten: set = set()
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
         self.emit_obs_on_accept: list = []   # (cons, emit_obs, emit_count) per accepting path
@@ -522,6 +526,8 @@ class Engine:
                     # unstaged tail with a fresh symbolic prior (worst case for those bytes).
                     old = self.state_old.get(kn)
                     if old is None or len(old) < n:
+                        if old is not None:
+                            self.state_old_overwritten.add(kn)   # wider read replaced a prior model
                         old = [z3.BitVec(f"state_old:{kn}_{i}", 8) for i in range(n)]
                         self.state_old[kn] = old
                     bs = bs + old[len(bs):n]
@@ -529,6 +535,8 @@ class Engine:
                 st.append(z3.BitVecVal(n, 64)); return
             old = self.state_old.get(kn)
             if old is None or len(old) < n:
+                if old is not None:
+                    self.state_old_overwritten.add(kn)           # wider read replaced a prior model
                 old = [z3.BitVec(f"state_old:{kn}_{i}", 8) for i in range(n)]
                 self.state_old[kn] = old
             self.store_bytes(p, wptr, old[:n])
