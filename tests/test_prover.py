@@ -29,6 +29,7 @@ import prove_permissioned_transfer                                          # no
 import prove_dst_lock                                                       # noqa: E402
 import prove_rate_limit                                                     # noqa: E402
 import prove_cron                                                           # noqa: E402
+import prove_partial_payment                                                # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
 
@@ -389,6 +390,14 @@ def test_validate_adversarial_no_false_proven():
     # The CORRECT signed check (ret == 8) must PROVE — confirms the driver is not
     # trivially always-CEX (it discriminates correct vs buggy presence checks).
     assert prove_validate.main(os.path.join(H, "adv_validate_signedok.wasm"), "LIM") == 0
+
+
+def test_partial_payment_safety():
+    # accept => the incoming payment is NOT a tfPartialPayment (0x00020000) — no dust delivered_amount
+    # trick. sfFlags field code = (2<<16)+2 = 0x20002 (engine input otxn_field:20002).
+    assert prove_partial_payment.main(os.path.join(H, "partial_payment_ok.wasm")) == 0   # rejects partial -> PROVEN
+    assert prove_partial_payment.main(os.path.join(H, "partial_payment_bug.wasm")) == 2  # trusts sfAmount -> CEX
+    assert prove_partial_payment.main(os.path.join(H, "authz.wasm")) == 1                # not amount-gated -> N/A
 
 
 def test_cron_stacking_bounded():
