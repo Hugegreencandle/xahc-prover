@@ -24,6 +24,9 @@ import hashlib
 import z3
 
 
+CHECK_TIMEOUT_S = 120   # per-obligation cadical/drat-trim wall-clock cap; a hang -> fail closed
+
+
 class ToolMissing(RuntimeError):
     pass
 
@@ -90,7 +93,11 @@ def make_and_verify(smt2_path: str, work_dir: str) -> dict:
     bitblast_to_cnf(smt2_path, cnf)
 
     # cadical exits 20 for UNSAT, 10 for SAT. A SAT obligation = the proof DOESN'T hold -> fail closed.
-    r = subprocess.run([cadical, cnf, drat], capture_output=True, text=True)
+    # FAIL-CLOSED on hang: a stuck checker must raise, never block proof minting indefinitely.
+    try:
+        r = subprocess.run([cadical, cnf, drat], capture_output=True, text=True, timeout=CHECK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ProofObjectError(f"{base}: cadical timed out after {CHECK_TIMEOUT_S}s (fail closed)")
     if r.returncode == 10:
         raise ProofObjectError(f"{base}: obligation is SATISFIABLE — the property does NOT hold "
                                "(this is a counterexample, not a proof)")
@@ -98,8 +105,12 @@ def make_and_verify(smt2_path: str, work_dir: str) -> dict:
         raise ProofObjectError(f"{base}: cadical did not return UNSAT (rc={r.returncode}) "
                                f"{(r.stderr or r.stdout or '')[-200:].strip()}")
 
-    v = subprocess.run([drat_trim, cnf, drat], capture_output=True, text=True)
-    verified = "s VERIFIED" in v.stdout
+    try:
+        v = subprocess.run([drat_trim, cnf, drat], capture_output=True, text=True, timeout=CHECK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ProofObjectError(f"{base}: drat-trim timed out after {CHECK_TIMEOUT_S}s (fail closed)")
+    # parse the verdict line-wise (not a loose substring): drat-trim prints "s VERIFIED" on its own line.
+    verified = any(line.strip() == "s VERIFIED" for line in v.stdout.splitlines())
     if not verified:
         raise ProofObjectError(f"{base}: drat-trim did NOT verify the proof\n{v.stdout[-400:]}")
 

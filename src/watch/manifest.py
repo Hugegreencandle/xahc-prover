@@ -135,7 +135,10 @@ def build_anchor_manifest(*, anchor_type: str, anchor_value: str, invariant: str
         prover_args=list(prover_args or ([] if reducer is None else [f"reducer={reducer}"])),
         smt_sha256=smt_sha256,
         proof_object_sha256=proof_object_sha256,
-        artifact_anchor=make_anchor(anchor_type, anchor_value, account, network_id),
+        artifact_anchor=make_anchor(
+            anchor_type,
+            anchor_value.upper() if anchor_type == "xahau.hook_hash" else anchor_value,
+            account, network_id),
         scope_caveats=list(scope_caveats or []),
         hook_account=account,
         network_id=network_id,

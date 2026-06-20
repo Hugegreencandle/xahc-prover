@@ -47,6 +47,12 @@ def main(path: str, strict: bool = False, field=None) -> int:
             items = [(field.key, writes[field.key])]
         for kn, wval in items:
             n_checked += 1
+            # Fail-closed: a key read at inconsistent widths has an AMBIGUOUS prior model in
+            # state_old, so the prior-vs-written comparison may not reflect what this path read.
+            if kn in e.state_old_overwritten:
+                print(f"\n⚠️ INCONCLUSIVE — state[{kn}] was read at inconsistent byte-widths "
+                      f"(ambiguous prior-value model); refusing PROVEN (fail closed).")
+                return 3
             old_bytes = e.state_old.get(kn)
             # SOUND: a write to a key that was NEVER read on any path means the
             # hook overwrites persisted state with NO regard for its prior value —

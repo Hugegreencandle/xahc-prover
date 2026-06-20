@@ -139,7 +139,7 @@ def cmd_checkproof(a) -> int:
         o = {"ok": False, "reason": str(ex)}
         _emit(o, a.json, lambda x: print(f"\n✗ checkproof FAILED — {x['reason']}"))
         return 2
-    ok = (a.expect_sha256 is None) or (sha == a.expect_sha256)
+    ok = (a.expect_sha256 is None) or (sha.upper() == (a.expect_sha256 or "").upper())
     o = {"ok": ok, "proof_object_sha256": sha, "expected": a.expect_sha256}
 
     def _p(x):

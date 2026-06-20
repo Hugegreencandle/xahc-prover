@@ -157,10 +157,13 @@ class Engine:
         self.rollbacks: list = []    # (code, cons)
         self.guard_viols: list = []  # (guard_id, maxiter, cons) per GUARD_VIOLATION path
         self.state_old: dict = {}    # state key (str) -> symbolic old value bytes (list[BitVec8])
-        # keys whose state_old was OVERWRITTEN by a wider later read (the prior-value symbols a path
-        # saw may differ from the final state_old) — invariants that pair old-vs-new per slot must
-        # fail-closed on these (the prior model is ambiguous). Populated by the `state` handler.
+        # keys whose state_old prior model is AMBIGUOUS — a key read at inconsistent widths across
+        # paths (or a wider read replacing a prior model) can't be faithfully represented by the
+        # single per-key state_old, so old-vs-new pairing per slot is unsound. Invariants that pair
+        # prior-vs-written (monotonic, constant-product) MUST fail-closed on these. Populated by the
+        # `state` handler. `state_read_widths` = first width each key was read at (to detect a 2nd).
         self.state_old_overwritten: set = set()
+        self.state_read_widths: dict = {}
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
         self.emit_obs_on_accept: list = []   # (cons, emit_obs, emit_count) per accepting path
@@ -503,6 +506,15 @@ class Engine:
             klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
             kn = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen)).decode("latin1")
             n = max(1, min(wlen, 256))
+            # AMBIGUITY GUARD (sound): if this key is read at a DIFFERENT width than a prior read,
+            # the single per-key `state_old` can't faithfully model every path's prior -> mark it so
+            # old-vs-new consumers fail closed. Catches the exact-staged-narrow-then-fresh-wider case
+            # the per-branch marks below miss. (Width is concrete here; multibyte keys unaffected.)
+            prev_w = self.state_read_widths.get(kn)
+            if prev_w is None:
+                self.state_read_widths[kn] = n
+            elif prev_w != n:
+                self.state_old_overwritten.add(kn)
             # SAME-INVOCATION READ-AFTER-WRITE (faithful to xahaud): a `state` read sees the
             # value just STAGED by an earlier `state_set` in THIS invocation. If this key was
             # written on this path, return the staged bytes (byte-exact); otherwise fall back
