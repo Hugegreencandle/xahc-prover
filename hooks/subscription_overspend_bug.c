@@ -55,17 +55,24 @@ int64_t hook(uint32_t reserved)
     XAHC_HOOK_PARAM_REQUIRE(cap_b, cap_key, 8);
     uint64_t cap = be64(cap_b);
 
-    /* --- read cumulative paid (default 0 if the slot does not exist yet) --- */
+    /* --- read cumulative paid (default 0 if the slot does not exist yet) ---
+     * FAIL CLOSED on a corrupt slot: state() returns the slot's byte length, or <0 if absent.
+     * srd == 8  -> present & well-formed, use it. srd < 0 -> absent (first fire), paid stays 0.
+     * srd >= 0 && != 8 -> the slot exists but is the WRONG length (corrupt / tampered): rolling
+     * back rather than silently resetting paid to 0, which would re-open the whole cap (overspend). */
     uint8_t skey[1] = { 0x01 };
     uint8_t sval[8] = { 0 };
     uint64_t paid = 0;
-    if (state(XAHC_SBUF(sval), XAHC_SBUF(skey)) == 8)
+    int64_t srd = state(XAHC_SBUF(sval), XAHC_SBUF(skey));
+    if (srd == 8)
         paid = be64(sval);
+    else
+        XAHC_REQUIRE(srd < 0, "corrupt cumulative-paid slot (present but not 8 bytes)");
 
     /* --- the safety gate: pay one period iff it stays within the lifetime cap --- */
     uint64_t next = paid + amt;
     /* fail-closed: positive amount, no u64 overflow, and within cap */
-    if (amt == 0 || next < paid)  /* BUG: dropped "next > cap" -> emits past the lifetime cap */
+    if (amt == 0 || next < paid)  /* BUG: dropped "next > cap" */
         XAHC_ACCEPT("subscription: cap reached or invalid — no payment this fire");
 
     /* emit exactly ONE capped payment to the locked payee (XAHC_EMIT_PAYMENT reserves 1) */

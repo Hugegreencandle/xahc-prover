@@ -144,8 +144,17 @@ def render(cert, out_dir):
             for r in bonus:
                 L.append(f"| `{r['invariant']}` | **PROVEN** | {r['description']} |")
             L.append("")
-        L.append("_Full battery results (including properties this Hook does not claim) are in "
-                 "`certification.json`._")
+        # Honest disclosure: report the COUNT of unclaimed non-proven battery results so a reader
+        # knows the full battery found more (without the per-line COUNTEREXAMPLE noise that reads as
+        # doubt on properties the Hook never claimed). Full per-line detail lives in certification.json.
+        unclaimed_cex = sum(1 for x in cert['results'] if not x['claimed'] and x['exit'] == 2)
+        unclaimed_inc = sum(1 for x in cert['results'] if not x['claimed'] and x['exit'] == 3)
+        if unclaimed_cex or unclaimed_inc:
+            L.append(f"_The full battery also ran properties this Hook does NOT claim: {unclaimed_cex} "
+                     f"counterexample(s) + {unclaimed_inc} inconclusive on UNCLAIMED invariants (not "
+                     "defects — the Hook doesn't claim them). Full per-line detail in `certification.json`._")
+        else:
+            L.append("_Full battery results are in `certification.json`._")
         L.append("")
     else:
         L.append("## Full-battery sweep (NOT a scoped certification)")

@@ -8,20 +8,28 @@
  * already executed irreversibly. This hook is built so it is safe on EVERY invocation regardless of
  * trigger, which is the strongest provable claim (the cron is just the schedule).
  *
- * Invariant set (each in the xahc-prover battery):
- *   period-budget : cumulative emitted <= CAP, for ALL inputs (never overpay the subscription total)
- *   dst-lock      : the emitted Payment goes ONLY to the locked payee PAY
+ * PROVEN invariant set (xahc-prover, each PROVEN for this exact bytecode):
+ *   emit-budget   : cumulative emitted <= CAP, for ALL inputs (never overpay the subscription total)
+ *   emit-dst-lock : every emitted Payment goes ONLY to the locked payee PAY
  *   nospend       : <= 1 Payment emitted per invocation (no double-pay)
+ *   monotonic     : the `paid` counter never moves backwards (replay/rollback-safe)
+ *   termination   : no guard-violation on any input (always terminates cleanly)
  *
- * HookParameters (install-time):
- *   "PAY" (20-byte account-id)  REQUIRED — the locked payee
- *   "AMT" (8-byte BE drops)     REQUIRED — amount paid each period
- *   "CAP" (8-byte BE drops)     REQUIRED — total lifetime cap (paid never exceeds this)
- * HookState (one entry):
- *   key {0x01} -> value 8 bytes BE = `paid` (cumulative drops emitted so far)
+ * SCOPE / OPERATOR ASSUMPTIONS (NOT hook-level proofs — the honest trust boundary):
+ *   - owner-only config: PROTOCOL-enforced. PAY/AMT/CAP are HookParameters set via SetHook, which only
+ *     the account owner can submit. The hook performs no origin check because none is needed.
+ *   - reserve: NOT proven here. If an emit would breach the account reserve it fails at the protocol
+ *     (the subscription stalls — fail-safe; it never overpays).
+ *   - 256-fire limit: the hook NEVER re-arms (emits no CronSet). The Cron protocol auto-recurs up to
+ *     RepeatCount (<=256, operator-set), then stops. To run longer, re-arm/re-deploy.
+ *   - emit-vs-apply: emit-budget proves emitted<=CAP. If an emitted Payment later fails to APPLY,
+ *     `paid` over-counts (the subscription pays LESS — fail-safe; never more).
+ *   - state model: proofs cover the present 8-byte slot; a present-but-wrong-length slot fails CLOSED
+ *     (rollback), not a silent reset.
  *
- * Fail CLOSED on any decode/state/overflow anomaly (rollback on the config path; on a cron fire we
- * simply do NOT emit). This is a spending AUTHORITY — when uncertain, it does not pay. */
+ * HookParameters (install-time): "PAY" 20B account-id · "AMT" 8B BE drops/period · "CAP" 8B BE lifetime cap.
+ * HookState: key {0x01} -> 8 bytes BE `paid` (cumulative drops emitted).
+ * Fail CLOSED on any decode/state/overflow anomaly. This is a spending AUTHORITY — when uncertain, it does not pay. */
 
 int64_t cbak(uint32_t reserved) { return 0; }
 
@@ -55,12 +63,19 @@ int64_t hook(uint32_t reserved)
     XAHC_HOOK_PARAM_REQUIRE(cap_b, cap_key, 8);
     uint64_t cap = be64(cap_b);
 
-    /* --- read cumulative paid (default 0 if the slot does not exist yet) --- */
+    /* --- read cumulative paid (default 0 if the slot does not exist yet) ---
+     * FAIL CLOSED on a corrupt slot: state() returns the slot's byte length, or <0 if absent.
+     * srd == 8  -> present & well-formed, use it. srd < 0 -> absent (first fire), paid stays 0.
+     * srd >= 0 && != 8 -> the slot exists but is the WRONG length (corrupt / tampered): rolling
+     * back rather than silently resetting paid to 0, which would re-open the whole cap (overspend). */
     uint8_t skey[1] = { 0x01 };
     uint8_t sval[8] = { 0 };
     uint64_t paid = 0;
-    if (state(XAHC_SBUF(sval), XAHC_SBUF(skey)) == 8)
+    int64_t srd = state(XAHC_SBUF(sval), XAHC_SBUF(skey));
+    if (srd == 8)
         paid = be64(sval);
+    else
+        XAHC_REQUIRE(srd < 0, "corrupt cumulative-paid slot (present but not 8 bytes)");
 
     /* --- the safety gate: pay one period iff it stays within the lifetime cap --- */
     uint64_t next = paid + amt;

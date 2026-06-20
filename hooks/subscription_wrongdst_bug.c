@@ -1,6 +1,6 @@
 #include "xahc/xahc.h"
 
-/* BUGGY SUBSCRIPTION (emits to an attacker addr, not the locked payee -> emit-dst-lock CEX) — the Cron-native recurring-payment Hook.
+/* BUGGY SUBSCRIPTION (emits to attacker addr, not locked payee) — the Cron-native recurring-payment Hook.
  *
  * Deploy on a payer account with a recurring Cron (CronSet: DelaySeconds=period,
  * RepeatCount<=256, StartTime). Each cron fire invokes this hook as a WEAK TSH (post-apply, CANNOT
@@ -46,7 +46,7 @@ int64_t hook(uint32_t reserved)
     XAHC_HOOK_PARAM_REQUIRE(pay, pay_key, 20);            /* the locked payee (read, then IGNORED) */
     uint8_t atk_key[3] = { 'A', 'T', 'K' };
     uint8_t atk[20];
-    XAHC_HOOK_PARAM_REQUIRE(atk, atk_key, 20);            /* BUG: an attacker-controlled payee */
+    XAHC_HOOK_PARAM_REQUIRE(atk, atk_key, 20);            /* BUG: attacker payee */
 
     uint8_t amt_key[3] = { 'A', 'M', 'T' };
     uint8_t amt_b[8];
@@ -58,12 +58,19 @@ int64_t hook(uint32_t reserved)
     XAHC_HOOK_PARAM_REQUIRE(cap_b, cap_key, 8);
     uint64_t cap = be64(cap_b);
 
-    /* --- read cumulative paid (default 0 if the slot does not exist yet) --- */
+    /* --- read cumulative paid (default 0 if the slot does not exist yet) ---
+     * FAIL CLOSED on a corrupt slot: state() returns the slot's byte length, or <0 if absent.
+     * srd == 8  -> present & well-formed, use it. srd < 0 -> absent (first fire), paid stays 0.
+     * srd >= 0 && != 8 -> the slot exists but is the WRONG length (corrupt / tampered): rolling
+     * back rather than silently resetting paid to 0, which would re-open the whole cap (overspend). */
     uint8_t skey[1] = { 0x01 };
     uint8_t sval[8] = { 0 };
     uint64_t paid = 0;
-    if (state(XAHC_SBUF(sval), XAHC_SBUF(skey)) == 8)
+    int64_t srd = state(XAHC_SBUF(sval), XAHC_SBUF(skey));
+    if (srd == 8)
         paid = be64(sval);
+    else
+        XAHC_REQUIRE(srd < 0, "corrupt cumulative-paid slot (present but not 8 bytes)");
 
     /* --- the safety gate: pay one period iff it stays within the lifetime cap --- */
     uint64_t next = paid + amt;
@@ -72,7 +79,7 @@ int64_t hook(uint32_t reserved)
         XAHC_ACCEPT("subscription: cap reached or invalid — no payment this fire");
 
     /* emit exactly ONE capped payment to the locked payee (XAHC_EMIT_PAYMENT reserves 1) */
-    XAHC_EMIT_PAYMENT(atk, amt, 0, 0);  /* BUG: pays atk, not the locked pay */
+    XAHC_EMIT_PAYMENT(atk, amt, 0, 0);  /* BUG: pays atk */
 
     /* advance the cumulative paid; fail closed if the state write fails */
     wr64(sval, next);
