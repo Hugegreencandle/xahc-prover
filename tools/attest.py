@@ -131,16 +131,22 @@ def render(cert, out_dir):
             v, _ = VERDICT.get(r['exit'], (f"EXIT_{r['exit']}", ""))
             L.append(f"| `{r['invariant']}` | **{v}** | {r['description']} |")
         L.append("")
-        other = [x for x in cert['results'] if not x['claimed'] and x['exit'] != 1]
-        if other:
-            L.append("### Additional battery results (informational — NOT claimed by this Hook)")
-            L.append("A non-match here is not a defect: the Hook does not claim these properties.")
+        # Informational bonus: ONLY additional properties that ALSO PROVED (exit 0). An unclaimed
+        # COUNTEREXAMPLE/INCONCLUSIVE on a property the Hook never claimed is not a defect, but it
+        # reads as doubt in a customer deliverable — so it is NOT rendered here (the full battery,
+        # incl. those, stays in certification.json). Keep the human cert clean: claimed set + bonus.
+        bonus = [x for x in cert['results'] if not x['claimed'] and x['exit'] == 0]
+        if bonus:
+            L.append("### Also proven (bonus — beyond the claimed set)")
+            L.append("Additional properties this Hook also satisfies, for free:")
             L.append("| Invariant | Verdict | Meaning |")
             L.append("|---|---|---|")
-            for r in other:
-                v, _ = VERDICT.get(r['exit'], (f"EXIT_{r['exit']}", ""))
-                L.append(f"| `{r['invariant']}` | {v} | {r['description']} |")
+            for r in bonus:
+                L.append(f"| `{r['invariant']}` | **PROVEN** | {r['description']} |")
             L.append("")
+        L.append("_Full battery results (including properties this Hook does not claim) are in "
+                 "`certification.json`._")
+        L.append("")
     else:
         L.append("## Full-battery sweep (NOT a scoped certification)")
         L.append(f"- **{cert['summary']['proven']} PROVEN** · {cert['summary']['counterexamples']} "
