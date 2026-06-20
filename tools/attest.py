@@ -117,8 +117,12 @@ def render(cert, out_dir):
         L.append(f"## Certification verdict: {badge}")
         L.append(f"Certified for the claimed property set: {', '.join('`'+c+'`' for c in claimed)}.")
         if verdict != "CERTIFIED":
-            L.append("One or more CLAIMED properties did not prove (COUNTEREXAMPLE or INCONCLUSIVE) — "
+            L.append("One or more CLAIMED properties did not prove (COUNTEREXAMPLE / INCONCLUSIVE / N/A) — "
                      "see the table; this Hook is NOT certified for its claimed set as-is.")
+        if cert.get("unevaluated_claims"):
+            L.append(f"- ⚠️ **Unevaluated claims (never ran — typo or not in the battery):** "
+                     f"{', '.join('`'+c+'`' for c in cert['unevaluated_claims'])}. A claim that wasn't "
+                     "evaluated is NOT certified.")
         L.append("")
         L.append("### Claimed properties (what this Hook is certified for)")
         L.append("| Invariant | Verdict | Meaning |")
@@ -214,10 +218,17 @@ def main():
     n_inc = sum(1 for r in rows if r["exit"] == 3)
     n_na = sum(1 for r in rows if r["exit"] == 1)
     # The certification verdict is over the CLAIMED set only (or the whole battery if no claim given).
+    ran = {r["invariant"] for r in rows}
+    # FALSE-CERTIFIED GUARD: a claimed invariant that never RAN (typo / not in battery / battery
+    # returned partial results) must NEVER count as satisfied. CERTIFIED requires EVERY claimed
+    # invariant to be present in the results AND PROVEN — not merely "not a counterexample".
+    missing_claims = [c for c in (claimed or []) if c not in ran]
     claimed_rows = [r for r in rows if r["claimed"]]
     claimed_cex = [r for r in claimed_rows if r["exit"] == 2]
     claimed_inc = [r for r in claimed_rows if r["exit"] == 3]
-    cert_passes = (not claimed_cex) and (not claimed_inc) and bool(claimed_rows)
+    claimed_unproven = [r for r in claimed_rows if r["exit"] != 0]   # CEX, INCONCLUSIVE, or N/A
+    cert_passes = bool(claimed) and (not missing_claims) and (not claimed_unproven) and \
+        all(any(r["invariant"] == c and r["exit"] == 0 for r in rows) for c in claimed)
 
     os.makedirs(out_dir, exist_ok=True)
     store = os.path.join(out_dir, "registry.jsonl")
@@ -228,6 +239,7 @@ def main():
         "kind": "xahau-hook-certification", "version": 1, "date": date,
         "customer": customer,
         "claimed_invariants": claimed,           # None = full-battery sweep (not a scoped certification)
+        "unevaluated_claims": missing_claims,    # claimed but never ran (typo / not in battery) — fail-closed
         "certification_verdict": ("CERTIFIED" if cert_passes else "NOT CERTIFIED") if claimed else "SWEEP",
         "hook": {"name": os.path.basename(wasm), "hook_hash": hh,
                  "wasm_sha256": wasm_sha256_of(b), "notes": notes},
@@ -246,9 +258,14 @@ def main():
           f"N/A {n_na} | {'SIGNED' if pub else 'UNSIGNED (tamper-evident)'}")
     print(f"certification -> {mp}")
     print(f"            json -> {jp}")
+    if missing_claims:
+        print(f"\n🚨 NOT CERTIFIED — claimed invariant(s) NEVER RAN (typo / not in battery): "
+              f"{missing_claims}. A claim that wasn't evaluated can't be certified.")
+        return 2
     if claimed and not cert_passes:
         print(f"\n⚠️ NOT CERTIFIED — a CLAIMED invariant failed: "
-              f"CEX {[r['invariant'] for r in claimed_cex]} INCONCLUSIVE {[r['invariant'] for r in claimed_inc]}")
+              f"CEX {[r['invariant'] for r in claimed_cex]} INCONCLUSIVE {[r['invariant'] for r in claimed_inc]} "
+              f"N/A {[r['invariant'] for r in claimed_rows if r['exit'] == 1]}")
         return 2
     if claimed is None and n_cex:
         print("\n(full-battery sweep — a COUNTEREXAMPLE on a property the Hook doesn't claim is NOT a "

@@ -42,19 +42,23 @@ VERDICT = {0: "PROVEN", 1: "N/A", 2: "COUNTEREXAMPLE", 3: "INCONCLUSIVE"}
 # fail-closed there. NEVER skip a driver whose ONLY known-unsafe coverage lives in the slow path.
 SLOW_DRIVERS = {"constant_product"}
 
-# prove_<driver>.main(os.path.join(H, "<wasm>")[, <extra args>]) == <expected>
+# Form A (inline):  prove_<driver>.main(os.path.join(H, "<wasm>")[, <extra>]) == <expected>
 CASE_RE = re.compile(
     r'prove_(\w+)\.main\(\s*os\.path\.join\(H,\s*"([^"]+\.wasm)"\)\s*(?:,\s*([^)]*?))?\)\s*==\s*(\d)'
 )
-
-
 def parse_corpus(test_path: str):
-    """Derive the labelled corpus from the test suite. Returns list of (driver, wasm, extra, expected)."""
-    cases = []
+    """Derive the CONTEXT-FREE labelled corpus from the test suite: only the inline form
+    `prove_X.main(os.path.join(H, "Y.wasm")[, lit]) == N` — a bare call this loop can faithfully
+    reproduce standalone. The STORED-VAR form (`v = main(...); assert v == N`) is deliberately NOT
+    captured: those assertions usually run under test-specific setup (mocks/patched engine flags), so
+    a bare standalone call gives a different (correct) verdict and would create FALSE alarms. Those
+    cases are covered by the full pytest suite, which the completeness guard points to."""
+    cases, seen = [], set()
     with open(test_path) as f:
         for m in CASE_RE.finditer(f.read()):
-            driver, wasm, extra, exp = m.group(1), m.group(2), (m.group(3) or "").strip(), int(m.group(4))
-            cases.append((driver, wasm, extra, exp))
+            key = (m.group(1), m.group(2), (m.group(3) or "").strip(), int(m.group(4)))
+            if key not in seen:
+                seen.add(key); cases.append(key)
     return cases
 
 
@@ -119,11 +123,19 @@ def main():
     except Exception:
         results = [_worker(c) for c in cases]
 
+    unsafe_uncovered = []   # KNOWN-UNSAFE (exp==2) cases that didn't actually run -> a coverage HOLE,
+                            # NOT benign: their false-PROVEN would be missed. Surfaced loudly below.
     for driver, wasm, extra, exp, act in results:
         if act == -1:
-            missing.append((driver, wasm)); continue
+            missing.append((driver, wasm))
+            if exp == 2:
+                unsafe_uncovered.append((driver, wasm, "missing fixture"))
+            continue
         if act == -2:
-            skipped.append((driver, wasm)); continue
+            skipped.append((driver, wasm))
+            if exp == 2:
+                unsafe_uncovered.append((driver, wasm, "harness could not run it (test-local args)"))
+            continue
         if act == exp:
             ok += 1
         if exp == 2 and act == 0:
@@ -140,6 +152,21 @@ def main():
     date = subprocess.run(["date", "+%F"], capture_output=True, text=True).stdout.strip()
     fp = len(false_proven)
 
+    # COMPLETENESS GUARD: the regex may not capture every must-be-COUNTEREXAMPLE assertion form
+    # (stored-var `v == 2`, module aliases, variable wasm paths). Count ALL `.main(...) == 2`
+    # assertions in the suite and compare — an uncaptured known-unsafe case is a SILENT coverage hole,
+    # so surface the gap loudly. (--fast also intentionally drops SLOW_DRIVERS; reported separately.)
+    try:
+        with open(TESTS) as f:
+            t = f.read()
+        # both forms of a must-be-COUNTEREXAMPLE assertion: inline `.main(...) == 2` and stored-var
+        # `assert <var> == 2`. (An over-count vs captured is fine — it only makes the guard MORE eager.)
+        raw_unsafe = len(re.findall(r"\.main\([^=\n]*\)\s*==\s*2\b", t)) + len(re.findall(r"assert\s+\w+\s*==\s*2\b", t))
+    except Exception:
+        raw_unsafe = known_unsafe
+    parser_gap = max(0, raw_unsafe - known_unsafe)   # known-unsafe assertions the parser didn't capture
+    fast_dropped = sorted(SLOW_DRIVERS) if fast else []
+
     # ---- report ----
     lines = [f"# Prover Soundness — {date}", ""]
     lines.append(f"**FALSE-PROVEN COUNT: {fp}**  (MUST be 0 — a false PROVEN certifies an unsafe hook)")
@@ -152,7 +179,25 @@ def main():
     lines.append(f"- precision regressions (good hook no longer PROVEN): {len(precision_reg)}")
     lines.append(f"- other mismatches: {len(mismatches)} | missing fixtures: {len(missing)} | "
                  f"skipped (test-local args, suite covers): {len(skipped)}")
+    lines.append(f"- **coverage: known-unsafe NOT actually checked: {len(unsafe_uncovered)} "
+                 f"| parser-missed must-be-CEX assertions: {parser_gap}"
+                 f"{' | --fast dropped: '+','.join(fast_dropped) if fast_dropped else ''}**")
     lines.append("")
+    if unsafe_uncovered or parser_gap or fast_dropped:
+        lines.append("## ⚠️ COVERAGE GAP — known-unsafe cases NOT verified this run (a false-PROVEN here "
+                     "would be MISSED)")
+        for d, w, why in unsafe_uncovered:
+            lines.append(f"- `prove_{d}` `{w}` — {why}")
+        if parser_gap:
+            lines.append(f"- ~{parser_gap} known-unsafe assertion(s) use the STORED-VAR / context-dependent "
+                         "form (they run under test-specific setup, so they're NOT faithfully reproducible "
+                         "by this standalone loop) — they ARE covered by the full suite. Run "
+                         "`python tests/test_prover.py` for the authoritative check; this loop is the "
+                         "fast context-free subset + the false-PROVEN metric.")
+        if fast_dropped:
+            lines.append(f"- --fast dropped slow driver(s): {', '.join(fast_dropped)} (covered only by the "
+                         "full/scheduled run, NOT this pre-push gate).")
+        lines.append("")
     if false_proven:
         lines.append("## 🚨 FALSE PROVEN — an invariant certified a KNOWN-UNSAFE hook")
         for d, w, e in false_proven:
@@ -187,15 +232,24 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     # ---- console ----
+    gap = len(unsafe_uncovered) + parser_gap
     print(f"corpus {n} cases ({known_unsafe} known-unsafe) | exact {ok}/{n} | FALSE-PROVEN {fp} | "
-          f"drift {len(detection_drift)} | precision-reg {len(precision_reg)} | missing {len(missing)}")
+          f"drift {len(detection_drift)} | precision-reg {len(precision_reg)} | missing {len(missing)} | "
+          f"COVERAGE-GAP {gap}{' (--fast drops '+','.join(fast_dropped)+')' if fast_dropped else ''}")
     print(f"report -> {rpt}")
     if fp:
         print("\n🚨 SOUNDNESS FAILURE — false PROVEN present:")
         for d, w, e in false_proven:
             print(f"   prove_{d} PROVEN on {w} (must be COUNTEREXAMPLE)")
         return 2
-    print("✅ no false PROVEN across the battery — sound.")
+    if gap:
+        # Sound for what ran (0 false-PROVEN in the context-free subset), but some known-unsafe cases
+        # need test-context this standalone loop can't reproduce. They're covered by the full suite —
+        # surface that honestly (don't block + don't false-alarm). This loop = the fast subset + metric.
+        print(f"\n⚠️ COVERAGE: {len(unsafe_uncovered)} test-local-arg + {parser_gap} context-dependent "
+              f"known-unsafe case(s) are NOT in this fast subset — they're covered by the full suite. "
+              f"Run `python tests/test_prover.py` for the authoritative check. (No false-PROVEN in what ran.)")
+    print("✅ no false PROVEN across what was checked — sound" + (" (with the coverage gap noted above)." if gap else "."))
     return 0
 
 
