@@ -44,6 +44,13 @@ def main(path: str, rx_key: str = "RX", ry_key: str = "RY") -> int:
     print(f"explored: {len(e.accepts_full)} accepting path(s); reserves=({rx_key!r},{ry_key!r}); "
           f"state keys written: {written}")
 
+    # Fail-closed: if a reserve slot's prior-value model was overwritten by an inconsistent-width
+    # read, a path's actual oldRX/oldRY may differ from e.state_old → we can't soundly pair old/new.
+    if rx_key in e.state_old_overwritten or ry_key in e.state_old_overwritten:
+        print("\n⚠️ INCONCLUSIVE — a reserve slot was read with inconsistent byte-widths (the "
+              "prior-value model is ambiguous); refusing PROVEN (fail closed).")
+        return 3
+
     n_checked = 0
     for code, cons, writes in e.accepts_full:
         if not feasible(cons):
