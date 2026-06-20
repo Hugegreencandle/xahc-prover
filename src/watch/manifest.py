@@ -42,6 +42,37 @@ def make_anchor(anchor_type: str, value: str, account: Optional[str] = None,
     return a
 
 
+# Re-check MODES — the second half of the cross-domain re-check format (v0.2, the Will/Ward co-design).
+# `make_anchor` says WHAT deployed artifact a proof is bound to; `make_check` says HOW a consumer
+# RE-CHECKS the proof itself, and crucially whether that re-check is state-INdependent or state-DEPENDENT:
+#   • 'unsat-obligation'      — Dane's safety proofs. The claim is an UNSAT verification condition over
+#                               the hook's behaviour for ALL inputs; re-checkable WITHOUT ledger state by
+#                               a solver (recheck) or a tiny DRAT/LRAT checker (checkproof). State-independent.
+#   • 'ledger-replay-receipt' — Ward's conformance receipts. The claim is "this transition conformed when
+#                               replayed against recorded ledger state"; re-checking it REQUIRES a ledger
+#                               oracle. State-dependent — NOT a universal-input proof.
+# These are different epistemic objects. Tagging the mode keeps the format honest: a state-dependent
+# replay receipt must NEVER be read as a state-independent all-inputs proof.
+CHECK_KIND_UNSAT = "unsat-obligation"
+CHECK_KIND_REPLAY = "ledger-replay-receipt"
+CHECK_KINDS = (CHECK_KIND_UNSAT, CHECK_KIND_REPLAY)
+
+
+def make_check(kind: str, obligation_format: Optional[str] = None,
+               rungs_supported: Optional[list] = None) -> dict:
+    """A domain-neutral RE-CHECK descriptor (the v0.2 cross-domain format). `kind` is one of
+    CHECK_KINDS (the re-check mode); `obligation_format` names the on-the-wire form a consumer
+    re-derives (e.g. 'smt2-qfbv', 'drat', 'lrat', or a Ward replay-receipt schema);
+    `rungs_supported` lists the re-check verbs a consumer can run (e.g. ['recheck'],
+    ['recheck','checkproof']). Self-describing so neither domain hard-codes the other's verbs."""
+    c = {"kind": kind}
+    if obligation_format is not None:
+        c["obligation_format"] = obligation_format
+    if rungs_supported is not None:
+        c["rungs_supported"] = list(rungs_supported)
+    return c
+
+
 def hook_hash_of(wasm: bytes) -> str:
     """Xahau HookHash of a hook's bytecode: SHA-512Half (first 32 bytes of SHA-512), upper hex."""
     return hashlib.sha512(wasm).digest()[:32].hex().upper()
@@ -78,6 +109,11 @@ class ProofManifest:
     # artifact's id. `hook_hash` stays the registry key (= the anchor value); this makes the manifest
     # self-describing + cross-domain. (v3.)
     artifact_anchor: Optional[dict] = None
+    # Domain-neutral RE-CHECK descriptor {kind, obligation_format?, rungs_supported?} — the v0.2
+    # cross-domain format. Says HOW a consumer re-checks this proof and whether that re-check is
+    # state-independent ('unsat-obligation') or state-dependent ('ledger-replay-receipt'). None =
+    # legacy (no declared re-check mode); a consumer must then make no state-independence assumption.
+    check: Optional[dict] = None
     scope_caveats: list = field(default_factory=list)  # e.g. ["cbak present", "INCONCLUSIVE region: ..."]
     hook_account: Optional[str] = None   # bound r-address (optional until bound to a deployment)
     network_id: Optional[int] = None     # e.g. 21338 (testnet)
@@ -96,6 +132,17 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
                    proof_object_sha256: Optional[str] = None,
                    created_at: Optional[str] = None) -> ProofManifest:
     hh = hook_hash_of(wasm)
+    # Auto-populate the re-check descriptor. A WASM-bound prover proof is ALWAYS the
+    # state-independent 'unsat-obligation' kind (an all-inputs verification condition). The
+    # supported re-check rungs are exactly the bindings present: recheck needs the SMT bundle,
+    # checkproof needs the solver-free proof-object bundle. No binding hash present => no rung is
+    # independently re-checkable => leave check None (don't advertise a rung a consumer can't run).
+    rungs = []
+    if smt_sha256:
+        rungs.append("recheck")
+    if proof_object_sha256:
+        rungs.append("checkproof")
+    check = make_check(CHECK_KIND_UNSAT, "smt2-qfbv", rungs) if rungs else None
     return ProofManifest(
         invariant=invariant,
         verdict=verdict,
@@ -107,6 +154,7 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
         smt_sha256=smt_sha256,
         proof_object_sha256=proof_object_sha256,
         artifact_anchor=make_anchor("xahau.hook_hash", hh, hook_account, network_id),
+        check=check,
         scope_caveats=list(scope_caveats or []),
         hook_account=hook_account,
         network_id=network_id,
@@ -120,11 +168,29 @@ def build_anchor_manifest(*, anchor_type: str, anchor_value: str, invariant: str
                           scope_caveats: Optional[list] = None, account: Optional[str] = None,
                           network_id: Optional[int] = None, prover_args: Optional[list] = None,
                           smt_sha256: Optional[str] = None, proof_object_sha256: Optional[str] = None,
-                          reducer: Optional[str] = None, created_at: Optional[str] = None) -> ProofManifest:
+                          reducer: Optional[str] = None, check_kind: Optional[str] = None,
+                          obligation_format: Optional[str] = None,
+                          created_at: Optional[str] = None) -> ProofManifest:
     """Build a manifest for a NON-WASM artifact (cross-domain — e.g. Ward's resolver code hash, an
     on-ledger object id). `hook_hash` is set to `anchor_value` so the SAME registry keys/looks it up;
     `artifact_anchor.anchor_type` says what KIND of anchor it is. The verifier recomputes anchor_value
-    from the deployed artifact and compares — identical re-check discipline, different domain."""
+    from the deployed artifact and compares — identical re-check discipline, different domain.
+
+    `check_kind` is the re-check MODE (one of CHECK_KINDS) — Ward passes 'ledger-replay-receipt' for
+    a state-dependent conformance receipt; a cross-domain UNSAT obligation passes 'unsat-obligation'.
+    None leaves `check` unset (legacy). The advertised rungs follow the bindings actually present
+    (recheck<-smt_sha256, checkproof<-proof_object_sha256); a replay receipt that ships neither
+    advertises no solver rung — its re-check is a ledger replay, not advertised here."""
+    check = None
+    if check_kind is not None:
+        if check_kind not in CHECK_KINDS:
+            raise ValueError(f"unknown check.kind {check_kind!r}; expected one of {CHECK_KINDS}")
+        rungs = []
+        if smt_sha256:
+            rungs.append("recheck")
+        if proof_object_sha256:
+            rungs.append("checkproof")
+        check = make_check(check_kind, obligation_format, rungs or None)
     return ProofManifest(
         invariant=invariant,
         verdict=verdict,
@@ -139,6 +205,7 @@ def build_anchor_manifest(*, anchor_type: str, anchor_value: str, invariant: str
             anchor_type,
             anchor_value.upper() if anchor_type == "xahau.hook_hash" else anchor_value,
             account, network_id),
+        check=check,
         scope_caveats=list(scope_caveats or []),
         hook_account=account,
         network_id=network_id,

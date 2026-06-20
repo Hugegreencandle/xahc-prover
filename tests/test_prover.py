@@ -30,6 +30,7 @@ import prove_dst_lock                                                       # no
 import prove_rate_limit                                                     # noqa: E402
 import prove_cron                                                           # noqa: E402
 import prove_partial_payment                                                # noqa: E402
+import prove_native_amount                                                  # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -407,6 +408,15 @@ def test_partial_payment_safety():
     assert prove_partial_payment.main(os.path.join(H, "partial_payment_ok.wasm")) == 0   # rejects partial -> PROVEN
     assert prove_partial_payment.main(os.path.join(H, "partial_payment_bug.wasm")) == 2  # trusts sfAmount -> CEX
     assert prove_partial_payment.main(os.path.join(H, "authz.wasm")) == 1                # not amount-gated -> N/A
+
+
+def test_native_amount_safety():
+    # accept => the incoming sfAmount is genuinely NATIVE XAH (byte0 not-XRP bit 0x80 CLEAR) — the
+    # hook can't be tricked into reading an issued (IOU) STAmount's XFL value word as native drops.
+    # The 8-byte sfAmount read exposes engine input "amt"; byte0 & 0x80 set == issued.
+    assert prove_native_amount.main(os.path.join(H, "native_amount_ok.wasm")) == 0   # rejects issued -> PROVEN
+    assert prove_native_amount.main(os.path.join(H, "native_amount_bug.wasm")) == 2  # masks 0x3F, ignores 0x80 -> CEX
+    assert prove_native_amount.main(os.path.join(H, "authz.wasm")) == 1              # not amount-gated -> N/A
 
 
 def test_cron_stacking_bounded():
@@ -2124,6 +2134,55 @@ def test_artifact_anchor_manifest():
     for mm, nm in [(m, "x.json"), (w, "w.json")]:
         p = _os.path.join(d, nm); write_manifest(mm, p)
         assert load_manifest(p).artifact_anchor == mm.artifact_anchor   # round-trips
+
+
+def test_check_kind_recheck_format():
+    # cross-domain re-check format v0.2: the `check` descriptor tags the re-check MODE + advertised
+    # rungs, and round-trips. Dane's WASM proofs => state-independent 'unsat-obligation'; Ward's
+    # receipts => state-dependent 'ledger-replay-receipt'. A replay receipt must NEVER be tagged unsat.
+    import tempfile, os as _os
+    from watch.manifest import (build_manifest, build_anchor_manifest, write_manifest, load_manifest,
+                                CHECK_KIND_UNSAT, CHECK_KIND_REPLAY)
+
+    m0 = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0)
+    assert m0.check is None
+    m1 = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0,
+                        smt_sha256="a" * 64)
+    assert m1.check["kind"] == CHECK_KIND_UNSAT
+    assert m1.check["rungs_supported"] == ["recheck"]
+    assert m1.check["obligation_format"] == "smt2-qfbv"
+    m2 = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0,
+                        smt_sha256="a" * 64, proof_object_sha256="b" * 64)
+    assert m2.check["rungs_supported"] == ["recheck", "checkproof"]
+    m3 = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0,
+                        proof_object_sha256="b" * 64)
+    assert m3.check["rungs_supported"] == ["checkproof"]
+    # Ward replay receipt: tagged state-dependent, NOT an all-inputs unsat proof; no solver rung.
+    w = build_anchor_manifest(anchor_type="xrpl.ledger_object", anchor_value="CAFE",
+                              invariant="default-resolution", verdict="PROVEN", exit_code=0,
+                              check_kind=CHECK_KIND_REPLAY, obligation_format="ward-replay-receipt-v1")
+    assert w.check["kind"] == CHECK_KIND_REPLAY and w.check["kind"] != CHECK_KIND_UNSAT
+    assert "rungs_supported" not in w.check
+    # an unknown re-check mode fails closed
+    try:
+        build_anchor_manifest(anchor_type="xrpl.code_hash", anchor_value="DEAD", invariant="x",
+                              verdict="PROVEN", exit_code=0, check_kind="state-independent")
+        assert False, "an unknown check.kind must raise, not silently pass"
+    except ValueError:
+        pass
+    # round-trip + legacy back-compat (no `check` key still loads as None)
+    d = tempfile.mkdtemp()
+    for mm, nm in [(m0, "m0.json"), (m1, "m1.json"), (m2, "m2.json"), (m3, "m3.json"), (w, "w.json")]:
+        p = _os.path.join(d, nm); write_manifest(mm, p)
+        assert load_manifest(p).check == mm.check
+    import json as _json
+    with open(_os.path.join(d, "m1.json")) as f:
+        obj = _json.load(f)
+    obj.pop("check", None)
+    legacy = _os.path.join(d, "legacy.json")
+    with open(legacy, "w") as f:
+        _json.dump(obj, f)
+    assert load_manifest(legacy).check is None
 
 
 def test_proof_object_registry_binding():
