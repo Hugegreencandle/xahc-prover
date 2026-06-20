@@ -35,6 +35,7 @@ import prove_emit_budget                                                    # no
 import prove_emit_dst_lock                                                  # noqa: E402
 import prove_trigger_lock                                                   # noqa: E402
 import prove_time_release                                                   # noqa: E402
+import prove_inactivity_release                                             # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -453,6 +454,14 @@ def test_time_release_safety():
     assert prove_time_release.main(os.path.join(H, "vesting_ok.wasm")) == 0          # cliff-gated -> PROVEN
     assert prove_time_release.main(os.path.join(H, "vesting_early_bug.wasm")) == 2   # no time gate -> CEX
     assert prove_time_release.main(os.path.join(H, "subscription_ok.wasm")) == 1     # no CLF param -> N/A
+
+
+def test_inactivity_release_safety():
+    # accept-with-emit => now >= last_seen + TMO: a dead-man-switch releases ONLY after the owner has
+    # been inactive >= TMO; owner activity resets the timer. The invariant behind inheritance/recovery.
+    assert prove_inactivity_release.main(os.path.join(H, "deadman_ok.wasm")) == 0         # inactivity-gated -> PROVEN
+    assert prove_inactivity_release.main(os.path.join(H, "deadman_early_bug.wasm")) == 2  # no gate -> CEX
+    assert prove_inactivity_release.main(os.path.join(H, "vesting_ok.wasm")) == 1         # no TMO param -> N/A
 
 
 def test_cron_stacking_bounded():
