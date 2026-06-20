@@ -58,6 +58,7 @@ class ProofManifest:
     params: dict = field(default_factory=dict)        # e.g. {"LIM": 5000000, "DST": "<20-byte hex>"}
     prover_args: list = field(default_factory=list)    # exact prover driver args (e.g. ["--field","01:0:8"]) — replay for reverify
     smt_sha256: Optional[str] = None                    # bundle hash of the exported SMT obligations — recheck binding
+    proof_object_sha256: Optional[str] = None           # bundle hash of the verified solver-free DRAT proof objects — checkproof binding
     scope_caveats: list = field(default_factory=list)  # e.g. ["cbak present", "INCONCLUSIVE region: ..."]
     hook_account: Optional[str] = None   # bound r-address (optional until bound to a deployment)
     network_id: Optional[int] = None     # e.g. 21338 (testnet)
@@ -73,6 +74,7 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
                    params: Optional[dict] = None, scope_caveats: Optional[list] = None,
                    hook_account: Optional[str] = None, network_id: Optional[int] = None,
                    prover_args: Optional[list] = None, smt_sha256: Optional[str] = None,
+                   proof_object_sha256: Optional[str] = None,
                    created_at: Optional[str] = None) -> ProofManifest:
     return ProofManifest(
         invariant=invariant,
@@ -83,6 +85,7 @@ def build_manifest(*, wasm: bytes, invariant: str, verdict: str, exit_code: int,
         params=dict(params or {}),
         prover_args=list(prover_args or []),
         smt_sha256=smt_sha256,
+        proof_object_sha256=proof_object_sha256,
         scope_caveats=list(scope_caveats or []),
         hook_account=hook_account,
         network_id=network_id,

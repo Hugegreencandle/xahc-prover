@@ -2090,6 +2090,39 @@ def test_proof_object_solver_free_drat():
         pass
 
 
+def test_proof_object_registry_binding():
+    # bind a verified solver-free proof-object bundle into a manifest; checkproof matches it.
+    import shutil, tempfile, os as _os
+    import proof_object as po
+    from watch.manifest import build_manifest, write_manifest, load_manifest
+    have = (shutil.which("cadical") or _os.environ.get("XAHC_CADICAL")) and \
+           (shutil.which("drat-trim") or _os.environ.get("XAHC_DRAT_TRIM"))
+    if not have:
+        print("  (skip test_proof_object_registry_binding: cadical/drat-trim not on PATH)")
+        return
+    import subprocess, sys as _sys
+    # emit a REAL obligation (overflow) — a non-trivial CNF that z3 bit-blasts deterministically
+    # (hand-written trivial UNSAT formulas get decided at simplify time -> degenerate, unstable CNF).
+    repo = _os.path.dirname(_os.path.dirname(__file__))
+    d = tempfile.mkdtemp()
+    subprocess.run([_sys.executable, "src/prove_overflow.py", "hooks/overflow.wasm"],
+                   cwd=repo, env=dict(_os.environ, XAHC_EMIT_SMT=d), capture_output=True)
+    assert any(n.endswith(".smt2") for n in _os.listdir(d)), "expected emitted .smt2 obligations"
+    sha = po.proof_bundle_sha256(d, tempfile.mkdtemp())
+    assert len(sha) == 64
+    assert po.proof_bundle_sha256(d, tempfile.mkdtemp()) == sha          # deterministic (binds the CNF)
+    m = build_manifest(wasm=b"\x00asm", invariant="overflow", verdict="PROVEN", exit_code=0, proof_object_sha256=sha)
+    p = _os.path.join(d, "m.json"); write_manifest(m, p)
+    assert load_manifest(p).proof_object_sha256 == sha                   # round-trips through the manifest
+    # FAIL-CLOSED: a SATISFIABLE obligation in the bundle -> no hash, raises
+    open(_os.path.join(d, "zz_sat.smt2"), "w").write("(declare-fun z () (_ BitVec 8))(assert (= z z))(check-sat)\n")
+    try:
+        po.proof_bundle_sha256(d, tempfile.mkdtemp())
+        assert False, "a SAT obligation must fail-closed, not yield a bundle hash"
+    except po.ProofObjectError:
+        pass
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     # also run the read-after-write adversarial suite (separate module, one runner)

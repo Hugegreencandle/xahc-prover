@@ -21,6 +21,7 @@ from registry import registry as R
 from registry.recheck import recheck_dir
 from registry.signing import Signer, load_signer, crypto_available
 from smt_export import bundle_sha256
+from proof_object import proof_bundle_sha256, ProofObjectError, ToolMissing
 from watch.manifest import load_manifest, build_manifest, write_manifest
 
 
@@ -87,9 +88,18 @@ def cmd_make_manifest(a) -> int:
         wasm = f.read()
     verdict = a.verdict or ("PROVEN" if a.exit == 0 else "NOT-PROVEN")
     smt_sha = bundle_sha256(a.smt) if a.smt else None
+    po_sha = None
+    if a.proof_object:
+        import tempfile
+        try:
+            po_sha = proof_bundle_sha256(a.proof_object, tempfile.mkdtemp())
+        except (ProofObjectError, ToolMissing) as ex:
+            # fail-closed: never record a proof-object hash unless every DRAT proof verified
+            print(f"refused: proof-object binding failed: {ex}", file=sys.stderr)
+            return 2
     m = build_manifest(wasm=wasm, invariant=a.invariant, verdict=verdict, exit_code=a.exit,
                        scope_caveats=a.caveat or [], hook_account=a.account, network_id=a.network,
-                       prover_args=a.prover_arg or [], smt_sha256=smt_sha)
+                       prover_args=a.prover_arg or [], smt_sha256=smt_sha, proof_object_sha256=po_sha)
     try:
         write_manifest(m, a.out)
     except ValueError as ex:
@@ -116,6 +126,31 @@ def cmd_keygen(a) -> int:
         print(f"seed (secret): {seed}")
         print(f"public key:    {pub}")
     return 0
+
+
+def cmd_checkproof(a) -> int:
+    """Solver-free re-check (verify-the-proof, strongest rung): for each obligation, bit-blast ->
+    cadical DRAT -> drat-trim VERIFIED, with the SMT engine AND solver out of the trust loop. Records
+    nothing; just re-derives the proof-object bundle hash and (optionally) matches it to the manifest."""
+    import tempfile
+    try:
+        sha = proof_bundle_sha256(a.smt_dir, tempfile.mkdtemp())
+    except (ProofObjectError, ToolMissing) as ex:
+        o = {"ok": False, "reason": str(ex)}
+        _emit(o, a.json, lambda x: print(f"\n✗ checkproof FAILED — {x['reason']}"))
+        return 2
+    ok = (a.expect_sha256 is None) or (sha == a.expect_sha256)
+    o = {"ok": ok, "proof_object_sha256": sha, "expected": a.expect_sha256}
+
+    def _p(x):
+        if not x["ok"]:
+            print(f"\n✗ checkproof — bundle {x['proof_object_sha256'][:16]}… ≠ manifest "
+                  f"{(x['expected'] or '')[:16]}…; the proof artifacts don't match what was attested.")
+        else:
+            print(f"\n✓ checkproof — every obligation's DRAT proof re-derived + VERIFIED by drat-trim "
+                  f"(cadical-solved, SMT engine NOT run). bundle {x['proof_object_sha256'][:16]}…")
+    _emit(o, a.json, _p)
+    return 0 if ok else 2
 
 
 def cmd_recheck(a) -> int:
@@ -185,6 +220,8 @@ def main(argv: list[str]) -> int:
     pm.add_argument("--prover-arg", action="append", dest="prover_arg",
                     help="exact prover driver arg to record for replay (repeatable), e.g. --field 01:0:8")
     pm.add_argument("--smt", help="dir of exported .smt2 obligations; records its bundle sha256 for recheck")
+    pm.add_argument("--proof-object", dest="proof_object",
+                    help="dir of exported .smt2; produce+verify solver-free DRAT proof objects (fail-closed) + record their bundle sha256 for checkproof")
     pm.add_argument("--out", required=True)
     pm.set_defaults(fn=cmd_make_manifest)
     prc = sub.add_parser("recheck"); prc.add_argument("smt_dir")
@@ -192,6 +229,11 @@ def main(argv: list[str]) -> int:
     prc.add_argument("--expect-sha256", dest="expect_sha256",
                      help="require the bundle to match this sha256 (bind to a registered artifact)")
     prc.add_argument("--json", action="store_true"); prc.set_defaults(fn=cmd_recheck)
+
+    pcp = sub.add_parser("checkproof"); pcp.add_argument("smt_dir")
+    pcp.add_argument("--expect-sha256", dest="expect_sha256",
+                     help="require the re-derived proof-object bundle to match this manifest hash")
+    pcp.add_argument("--json", action="store_true"); pcp.set_defaults(fn=cmd_checkproof)
 
     a = p.parse_args(argv)
     return a.fn(a)

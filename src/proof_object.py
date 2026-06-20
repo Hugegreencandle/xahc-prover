@@ -129,6 +129,27 @@ def verify_dir(obl_dir: str, work_dir: str) -> dict:
     return {"total": n, "verified": ok, "failed": n - ok, "results": results}
 
 
+def proof_bundle_sha256(smt_dir: str, work_dir: str) -> str:
+    """Produce + verify a DRAT proof object for EVERY obligation in smt_dir, then return one bundle
+    sha256 over the sorted per-file (cnf,drat) hashes. FAIL-CLOSED: raises if there are no
+    obligations, or if ANY proof object fails to verify — a bundle hash exists only when every
+    solver-free proof checked. This is what the registry manifest binds (proof_object_sha256)."""
+    s = verify_dir(smt_dir, work_dir)
+    if s["total"] == 0:
+        raise ProofObjectError(f"no .smt2 obligations in {smt_dir}")
+    if s["failed"]:
+        bad = [n for n, r in s["results"].items() if not r.get("verified")]
+        raise ProofObjectError(f"{s['failed']}/{s['total']} proof object(s) did not verify: {bad}")
+    # Bind the OBLIGATIONS (the deterministic .smt2 text the engine emitted), NOT the ephemeral DRAT
+    # (a SAT solver emits a different valid proof each run) nor z3's CNF (Goal.dimacs() variable
+    # numbering isn't stable across calls). The recorded value's MEANING: every obligation was
+    # independently solver-free-checked (bit-blast -> cadical -> drat-trim VERIFIED) at mint time;
+    # checkproof re-derives a fresh DRAT and re-verifies. This is the same obligation identity recheck
+    # uses, so the two methods bind the same claim by different checkers.
+    from smt_export import bundle_sha256
+    return bundle_sha256(smt_dir)
+
+
 if __name__ == "__main__":
     import sys
     target = sys.argv[1] if len(sys.argv) > 1 else "."
