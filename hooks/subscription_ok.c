@@ -15,8 +15,13 @@
  *   monotonic     : the `paid` counter never moves backwards (replay/rollback-safe)
  *   termination   : no guard-violation on any input (always terminates cleanly)
  *
- * SCOPE / OPERATOR ASSUMPTIONS (NOT hook-level proofs — the honest trust boundary):
- *   - owner-only config: PROTOCOL-enforced. PAY/AMT/CAP are HookParameters set via SetHook, which only
+ * ENFORCED in-hook:
+ *   - trigger lock: the hook only emits on the account's OWN Cron fire (otxn_type == ttCRON == 92);
+ *     any other tx touching the account (incoming Payment, Invoke, ...) is a no-op. A non-owner
+ *     CANNOT trigger a subscription payment. (The emit invariants are proven under this gate.)
+ *
+ * SCOPE / OPERATOR ASSUMPTIONS (protocol-boundary — NOT hook-level proofs, honestly disclosed):
+ *   - owner-only CONFIG: PROTOCOL-enforced. PAY/AMT/CAP are HookParameters set via SetHook, which only
  *     the account owner can submit. The hook performs no origin check because none is needed.
  *   - reserve: NOT proven here. If an emit would breach the account reserve it fails at the protocol
  *     (the subscription stalls — fail-safe; it never overpays).
@@ -44,9 +49,18 @@ static inline void wr64(uint8_t* b, uint64_t v) {
     b[6] = (uint8_t)(v >> 8);  b[7] = (uint8_t)(v);
 }
 
+#define XAHC_ttCRON 92   /* the Cron pseudo-tx (verified vs xahau TRANSACTION_TYPES; CronSet=93) */
+
 int64_t hook(uint32_t reserved)
 {
     XAHC_HOOK_ENTRY();
+
+    /* TRIGGER LOCK: act ONLY on this account's own scheduled Cron fire. ttCRON fires the owner's hook
+     * as a weak TSH; any OTHER tx touching the account (an incoming Payment, an Invoke, etc.) must NOT
+     * drive a subscription payment. Without this gate a non-owner could trigger an (capped, payee-locked
+     * but still unintended) emit by sending the account a tx. */
+    if (otxn_type() != XAHC_ttCRON)
+        XAHC_ACCEPT("not a Cron fire — the subscription only acts on its own schedule");
 
     /* --- required install params --- */
     uint8_t pay_key[3] = { 'P', 'A', 'Y' };

@@ -1,6 +1,6 @@
 #include "xahc/xahc.h"
 
-/* BUGGY SUBSCRIPTION (no cap gate -> overspends past CAP) — the Cron-native recurring-payment Hook.
+/* BUGGY SUBSCRIPTION (no cap gate) — the Cron-native recurring-payment Hook.
  *
  * Deploy on a payer account with a recurring Cron (CronSet: DelaySeconds=period,
  * RepeatCount<=256, StartTime). Each cron fire invokes this hook as a WEAK TSH (post-apply, CANNOT
@@ -8,20 +8,28 @@
  * already executed irreversibly. This hook is built so it is safe on EVERY invocation regardless of
  * trigger, which is the strongest provable claim (the cron is just the schedule).
  *
- * Invariant set (each in the xahc-prover battery):
- *   period-budget : cumulative emitted <= CAP, for ALL inputs (never overpay the subscription total)
- *   dst-lock      : the emitted Payment goes ONLY to the locked payee PAY
+ * PROVEN invariant set (xahc-prover, each PROVEN for this exact bytecode):
+ *   emit-budget   : cumulative emitted <= CAP, for ALL inputs (never overpay the subscription total)
+ *   emit-dst-lock : every emitted Payment goes ONLY to the locked payee PAY
  *   nospend       : <= 1 Payment emitted per invocation (no double-pay)
+ *   monotonic     : the `paid` counter never moves backwards (replay/rollback-safe)
+ *   termination   : no guard-violation on any input (always terminates cleanly)
  *
- * HookParameters (install-time):
- *   "PAY" (20-byte account-id)  REQUIRED — the locked payee
- *   "AMT" (8-byte BE drops)     REQUIRED — amount paid each period
- *   "CAP" (8-byte BE drops)     REQUIRED — total lifetime cap (paid never exceeds this)
- * HookState (one entry):
- *   key {0x01} -> value 8 bytes BE = `paid` (cumulative drops emitted so far)
+ * SCOPE / OPERATOR ASSUMPTIONS (NOT hook-level proofs — the honest trust boundary):
+ *   - owner-only config: PROTOCOL-enforced. PAY/AMT/CAP are HookParameters set via SetHook, which only
+ *     the account owner can submit. The hook performs no origin check because none is needed.
+ *   - reserve: NOT proven here. If an emit would breach the account reserve it fails at the protocol
+ *     (the subscription stalls — fail-safe; it never overpays).
+ *   - 256-fire limit: the hook NEVER re-arms (emits no CronSet). The Cron protocol auto-recurs up to
+ *     RepeatCount (<=256, operator-set), then stops. To run longer, re-arm/re-deploy.
+ *   - emit-vs-apply: emit-budget proves emitted<=CAP. If an emitted Payment later fails to APPLY,
+ *     `paid` over-counts (the subscription pays LESS — fail-safe; never more).
+ *   - state model: proofs cover the present 8-byte slot; a present-but-wrong-length slot fails CLOSED
+ *     (rollback), not a silent reset.
  *
- * Fail CLOSED on any decode/state/overflow anomaly (rollback on the config path; on a cron fire we
- * simply do NOT emit). This is a spending AUTHORITY — when uncertain, it does not pay. */
+ * HookParameters (install-time): "PAY" 20B account-id · "AMT" 8B BE drops/period · "CAP" 8B BE lifetime cap.
+ * HookState: key {0x01} -> 8 bytes BE `paid` (cumulative drops emitted).
+ * Fail CLOSED on any decode/state/overflow anomaly. This is a spending AUTHORITY — when uncertain, it does not pay. */
 
 int64_t cbak(uint32_t reserved) { return 0; }
 
@@ -36,9 +44,18 @@ static inline void wr64(uint8_t* b, uint64_t v) {
     b[6] = (uint8_t)(v >> 8);  b[7] = (uint8_t)(v);
 }
 
+#define XAHC_ttCRON 92   /* the Cron pseudo-tx (verified vs xahau TRANSACTION_TYPES; CronSet=93) */
+
 int64_t hook(uint32_t reserved)
 {
     XAHC_HOOK_ENTRY();
+
+    /* TRIGGER LOCK: act ONLY on this account's own scheduled Cron fire. ttCRON fires the owner's hook
+     * as a weak TSH; any OTHER tx touching the account (an incoming Payment, an Invoke, etc.) must NOT
+     * drive a subscription payment. Without this gate a non-owner could trigger an (capped, payee-locked
+     * but still unintended) emit by sending the account a tx. */
+    if (otxn_type() != XAHC_ttCRON)
+        XAHC_ACCEPT("not a Cron fire — the subscription only acts on its own schedule");
 
     /* --- required install params --- */
     uint8_t pay_key[3] = { 'P', 'A', 'Y' };
@@ -72,7 +89,7 @@ int64_t hook(uint32_t reserved)
     /* --- the safety gate: pay one period iff it stays within the lifetime cap --- */
     uint64_t next = paid + amt;
     /* fail-closed: positive amount, no u64 overflow, and within cap */
-    if (amt == 0 || next < paid)  /* BUG: dropped "next > cap" */
+    if (amt == 0 || next < paid)  /* BUG: dropped cap */
         XAHC_ACCEPT("subscription: cap reached or invalid — no payment this fire");
 
     /* emit exactly ONE capped payment to the locked payee (XAHC_EMIT_PAYMENT reserves 1) */
