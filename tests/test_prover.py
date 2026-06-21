@@ -40,6 +40,7 @@ import prove_split_conservation                                             # no
 import prove_hashlock                                                       # noqa: E402
 import prove_quorum                                                         # noqa: E402
 import prove_master_disuse                                                  # noqa: E402
+import prove_qday_freeze                                                    # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -508,6 +509,14 @@ def test_master_disuse_safety():
     assert prove_master_disuse.main(os.path.join(H, "qkey_guard_unsafe.wasm")) == 2   # accepts master-signed -> CEX
     assert prove_master_disuse.main(os.path.join(H, "qkey_guard_hole.wasm")) == 2     # early bypass (payment allowlisted) -> CEX (vacuity fails toward CEX, not false-PROVEN)
     assert prove_master_disuse.main(os.path.join(H, "agent_guardrail.wasm")) == 1     # doesn't read signing key -> N/A
+
+
+def test_qday_freeze_safety():
+    # quantum recovery vault: accept AND outgoing => a presented input's sha512h == committed QH.
+    # Funds move only for the preimage holder; a Shor-broken classical key alone cannot spend.
+    assert prove_qday_freeze.main(os.path.join(H, "qday_vault.wasm")) == 0          # preimage-gated -> PROVEN
+    assert prove_qday_freeze.main(os.path.join(H, "qday_vault_unsafe.wasm")) == 2   # accepts w/o preimage -> CEX
+    assert prove_qday_freeze.main(os.path.join(H, "qkey_guard.wasm")) == 1          # no QH param -> N/A
 
 
 def test_cron_stacking_bounded():
