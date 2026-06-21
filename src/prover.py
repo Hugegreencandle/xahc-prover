@@ -58,7 +58,7 @@ class Path:
     __slots__ = ("stack", "locals", "globals", "mem", "cons", "guards", "writes",
                  "writes_bytes",
                  "emit_count", "emits", "emits_iou", "emit_obs", "emit_tts", "fees", "fsets",
-                 "reserve_n", "reserve_calls", "mutation_rets")
+                 "hash_obs", "reserve_n", "reserve_calls", "mutation_rets")
 
     def __init__(self):
         self.stack: list = []
@@ -80,6 +80,9 @@ class Path:
         # {amount, dest(20 bytes), dtag, stag} per emit, or None if the blob isn't the recognized
         # native template (an unrecognized/IOU emit -> the consumer must FAIL CLOSED, never PROVEN).
         self.emit_obs: list = []
+        # (input_expr, digest_256) per util_sha512h call — exposes WHAT the hook hashed so an invariant
+        # can prove an emit/accept requires a hash match (e.g. hashlock: digest == committed H). Record-only.
+        self.hash_obs: list = []
         # per-emit concrete TransactionType (int) of the emitted blob, or None if not concrete.
         # ttCRON_SET == 93 (0x5D) — lets cron-safety bound the # of CronSet re-arms emitted.
         self.emit_tts: list = []
@@ -116,6 +119,7 @@ class Path:
         p.emits = list(self.emits)
         p.emits_iou = list(self.emits_iou)
         p.emit_obs = list(self.emit_obs)
+        p.hash_obs = list(self.hash_obs)
         p.emit_tts = list(self.emit_tts)
         p.fees = list(self.fees)
         p.fsets = list(self.fsets)
@@ -167,6 +171,7 @@ class Engine:
         self.emits_on_accept: list = []  # (cons, emits, emit_count) per accepting path
         self.iou_emits_on_accept: list = []  # (cons, emits_iou, emit_count) per accepting path
         self.emit_obs_on_accept: list = []   # (cons, emit_obs, emit_count) per accepting path
+        self.hash_obs_on_accept: list = []   # (cons, hash_obs) per accepting path — for hashlock etc.
         self.emit_tts_on_accept: list = []   # (cons, emit_tts, emit_count) per accepting path — cron
         # ---- #7 emission-burden ----
         # Per accepting path: (cons, emit_count:int, reserve_n:BitVec64|None, reserve_calls:int).
@@ -578,7 +583,9 @@ class Engine:
             rlen = conc(st.pop()); rptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
             n = max(1, min(rlen, 256))
             inp = [self.load_byte(p, rptr + i) for i in range(n)]   # big-endian input
-            digest = self.sha512h(z3.Concat(*inp) if n > 1 else inp[0])   # 256-bit
+            _hin = z3.Concat(*inp) if n > 1 else inp[0]
+            digest = self.sha512h(_hin)   # 256-bit
+            p.hash_obs.append((_hin, digest))   # record-only: expose (input, digest) for hashlock etc.
             out = [z3.Extract(255 - 8 * i, 248 - 8 * i, digest) for i in range(32)]  # BE 32 bytes
             self.store_bytes(p, wptr, out[:max(1, min(wlen, 32))])
             st.append(z3.BitVecVal(32, 64)); return
@@ -907,6 +914,7 @@ class Engine:
                 self.emits_on_accept.append((list(p.cons), list(p.emits), p.emit_count))
                 self.iou_emits_on_accept.append((list(p.cons), list(p.emits_iou), p.emit_count))
                 self.emit_obs_on_accept.append((list(p.cons), list(p.emit_obs), p.emit_count))
+                self.hash_obs_on_accept.append((list(p.cons), list(p.hash_obs)))
                 self.emit_tts_on_accept.append((list(p.cons), list(p.emit_tts), p.emit_count))
                 self.fees_on_accept.append((list(p.cons), list(p.fees), p.emit_count))
                 self.foreign_sets_on_accept.append((list(p.cons), list(p.fsets)))

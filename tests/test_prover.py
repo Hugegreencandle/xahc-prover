@@ -37,6 +37,7 @@ import prove_trigger_lock                                                   # no
 import prove_time_release                                                   # noqa: E402
 import prove_inactivity_release                                             # noqa: E402
 import prove_split_conservation                                             # noqa: E402
+import prove_hashlock                                                       # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -480,6 +481,14 @@ def test_revenue_split3():
     assert prove_split_conservation.main(os.path.join(H, "revenue_split3_skim_bug.wasm")) == 2  # drops PYC -> CEX
     assert prove_trigger_lock.main(os.path.join(H, "revenue_split3_ok.wasm")) == 0              # cron-only -> PROVEN
     assert prove_monotonic.main(os.path.join(H, "revenue_split3_ok.wasm")) == 0                 # replay-safe -> PROVEN
+
+
+def test_hashlock_safety():
+    # accept-with-emit => a presented input hashes to the committed H: an HTLC escrow releases ONLY to
+    # the preimage-holder (under SHA-512Half collision-resistance; engine models util_sha512h injectively).
+    assert prove_hashlock.main(os.path.join(H, "escrow_ok.wasm")) == 0          # preimage-gated -> PROVEN
+    assert prove_hashlock.main(os.path.join(H, "escrow_nopre_bug.wasm")) == 2   # no match gate -> CEX
+    assert prove_hashlock.main(os.path.join(H, "subscription_ok.wasm")) == 1    # no HSH param -> N/A
 
 
 def test_cron_stacking_bounded():
