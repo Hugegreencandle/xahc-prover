@@ -38,6 +38,7 @@ import prove_time_release                                                   # no
 import prove_inactivity_release                                             # noqa: E402
 import prove_split_conservation                                             # noqa: E402
 import prove_hashlock                                                       # noqa: E402
+import prove_quorum                                                         # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -489,6 +490,14 @@ def test_hashlock_safety():
     assert prove_hashlock.main(os.path.join(H, "escrow_ok.wasm")) == 0          # preimage-gated -> PROVEN
     assert prove_hashlock.main(os.path.join(H, "escrow_nopre_bug.wasm")) == 2   # no match gate -> CEX
     assert prove_hashlock.main(os.path.join(H, "subscription_ok.wasm")) == 1    # no HSH param -> N/A
+
+
+def test_quorum_safety():
+    # accept-with-emit => popcount(approval_mask & SGM) >= THR: an N-of-M multisig treasury releases ONLY
+    # at quorum. SGM (designated-bit mask) keeps the symbolic-prior junk bits from inflating the count.
+    assert prove_quorum.main(os.path.join(H, "multisig_ok.wasm")) == 0             # quorum-gated -> PROVEN
+    assert prove_quorum.main(os.path.join(H, "multisig_subquorum_bug.wasm")) == 2  # releases on 1st -> CEX
+    assert prove_quorum.main(os.path.join(H, "subscription_ok.wasm")) == 1         # no THR param -> N/A
 
 
 def test_cron_stacking_bounded():
