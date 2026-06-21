@@ -36,6 +36,7 @@ import prove_emit_dst_lock                                                  # no
 import prove_trigger_lock                                                   # noqa: E402
 import prove_time_release                                                   # noqa: E402
 import prove_inactivity_release                                             # noqa: E402
+import prove_split_conservation                                             # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -462,6 +463,14 @@ def test_inactivity_release_safety():
     assert prove_inactivity_release.main(os.path.join(H, "deadman_ok.wasm")) == 0         # inactivity-gated -> PROVEN
     assert prove_inactivity_release.main(os.path.join(H, "deadman_early_bug.wasm")) == 2  # no gate -> CEX
     assert prove_inactivity_release.main(os.path.join(H, "vesting_ok.wasm")) == 1         # no TMO param -> N/A
+
+
+def test_split_conservation_safety():
+    # accept-with-emit => sum(emitted drops) == PER: a revenue-split distributes EXACTLY the declared
+    # total, no skim, no short. Fails closed (INCONCLUSIVE) if amounts aren't provably valid native (<2^62).
+    assert prove_split_conservation.main(os.path.join(H, "revenue_split_ok.wasm")) == 0        # exact -> PROVEN
+    assert prove_split_conservation.main(os.path.join(H, "revenue_split_skim_bug.wasm")) == 2  # skims B -> CEX
+    assert prove_split_conservation.main(os.path.join(H, "subscription_ok.wasm")) == 1         # no PER -> N/A
 
 
 def test_cron_stacking_bounded():
