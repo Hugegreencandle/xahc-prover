@@ -940,6 +940,29 @@ class Engine:
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
+        # ── Slot API ──────────────────────────────────────────────────────────────────────────
+        # Slots hold LEDGER-OBJECT data the hook reads: slot_set loads an object (by keylet / txn
+        # hash) into a numbered slot, then slot/slot_subfield/slot_float/… read its contents. That
+        # data is EXTERNAL and unconstrainable, so we model every read as FRESH SYMBOLIC (the hook
+        # must be safe for ANY object contents) and every return as SYMBOLIC (a slot op can succeed
+        # -> slot-no, or fail -> negative; both branches are explored = fail-closed). We never assume
+        # slot contents or success, so this can only INCONCLUSIVE, never false-PROVEN. (Surfaced by
+        # external foreign-state hooks — the next coverage frontier after trace/otxn_param/keylet.)
+        if name == "slot":   # slot(write_ptr, write_len, slot_no) -> serialized bytes written | <0
+            slot_no = st.pop(); wlen = conc(st.pop()); wptr = conc(st.pop()); _ = slot_no
+            n = max(1, min(wlen, 256)); self._undef += 1
+            bs = [z3.BitVec(f"slot_data_{self._undef}_{i}", 8) for i in range(n)]
+            self.store_bytes(p, wptr, bs)
+            self._undef += 1; st.append(z3.BitVec(f"slot_ret_{self._undef}", 64)); return
+        if name in ("slot_set", "slot_subfield", "slot_subarray"):   # 3 args -> slot-no | <0
+            st.pop(); st.pop(); st.pop()
+            self._undef += 1; st.append(z3.BitVec(f"{name}_ret_{self._undef}", 64)); return
+        if name == "slot_type":   # slot_type(slot_no, flags) -> type | <0  (2 args)
+            st.pop(); st.pop()
+            self._undef += 1; st.append(z3.BitVec(f"slot_type_ret_{self._undef}", 64)); return
+        if name in ("slot_count", "slot_size", "slot_clear", "slot_float"):   # 1 arg -> value | <0
+            st.pop()
+            self._undef += 1; st.append(z3.BitVec(f"{name}_ret_{self._undef}", 64)); return
         if name == "util_keylet":
             # util_keylet(write_ptr, write_len, keylet_type, a,b,c,d,e,f) -> 34 (a 34-byte keylet) | <0.
             # 9 args always. SOUND over-approximation: write a FRESH symbolic 34-byte keylet (an opaque
