@@ -473,6 +473,15 @@ def test_split_conservation_safety():
     assert prove_split_conservation.main(os.path.join(H, "subscription_ok.wasm")) == 1         # no PER -> N/A
 
 
+def test_revenue_split3():
+    # split-conservation generalizes to N=3 (PYA/PYB/PYC). The prover caught a real u64-wrap overflow in
+    # the share bounds during the build (sha+shb could wrap past per) -> fixed with per-share bounds.
+    assert prove_split_conservation.main(os.path.join(H, "revenue_split3_ok.wasm")) == 0        # exact 3-way -> PROVEN
+    assert prove_split_conservation.main(os.path.join(H, "revenue_split3_skim_bug.wasm")) == 2  # drops PYC -> CEX
+    assert prove_trigger_lock.main(os.path.join(H, "revenue_split3_ok.wasm")) == 0              # cron-only -> PROVEN
+    assert prove_monotonic.main(os.path.join(H, "revenue_split3_ok.wasm")) == 0                 # replay-safe -> PROVEN
+
+
 def test_cron_stacking_bounded():
     # accept => <= K CronSet (ttCRON_SET=93) emitted per invocation — no unbounded re-arm/stacking.
     assert prove_cron.main(os.path.join(H, "cron_ok.wasm")) == 0       # re-arms once -> PROVEN (K=1)
