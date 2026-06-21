@@ -39,6 +39,7 @@ import prove_inactivity_release                                             # no
 import prove_split_conservation                                             # noqa: E402
 import prove_hashlock                                                       # noqa: E402
 import prove_quorum                                                         # noqa: E402
+import prove_master_disuse                                                  # noqa: E402
 import prove_constant_product                                               # noqa: E402
 import dsl, prove_dsl                                                      # noqa: E402
 import xfl                                                                # noqa: E402
@@ -498,6 +499,14 @@ def test_quorum_safety():
     assert prove_quorum.main(os.path.join(H, "multisig_ok.wasm")) == 0             # quorum-gated -> PROVEN
     assert prove_quorum.main(os.path.join(H, "multisig_subquorum_bug.wasm")) == 2  # releases on 1st -> CEX
     assert prove_quorum.main(os.path.join(H, "subscription_ok.wasm")) == 1         # no THR param -> N/A
+
+
+def test_master_disuse_safety():
+    # quantum key-rotation: accept AND outgoing => otxn_type in {5,12,22} OR SigningPubKey!=33B
+    # OR SigningPubKey!=MPK. No ordinary outgoing tx is signed by the unrotatable master key.
+    assert prove_master_disuse.main(os.path.join(H, "qkey_guard.wasm")) == 0          # master-disuse -> PROVEN
+    assert prove_master_disuse.main(os.path.join(H, "qkey_guard_unsafe.wasm")) == 2   # accepts master-signed -> CEX
+    assert prove_master_disuse.main(os.path.join(H, "agent_guardrail.wasm")) == 1     # doesn't read signing key -> N/A
 
 
 def test_cron_stacking_bounded():
