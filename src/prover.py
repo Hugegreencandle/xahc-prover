@@ -506,6 +506,22 @@ class Engine:
             ret = z3.BitVec(f"hook_param_ret:{kn}", 64)
             self.inputs[f"hook_param_ret:{kn}"] = ret    # expose for invariant scoping
             st.append(ret); return
+        if name == "otxn_param":
+            # Parameter riding on the TRIGGERING txn (vs install-time hook_param). Same shape:
+            # write_ptr,write_len, kread_ptr,kread_len -> bytes read (or negative if absent). Modeled
+            # SOUND like hook_param — symbolic content + symbolic return so length/presence-gated
+            # branches are explored. Keyed `otxnparam:<key>` to expose for invariant scoping.
+            klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
+            key = bytes(conc(self.load_byte(p, kptr + i)) for i in range(klen))
+            kn = key.decode("latin1")
+            n = max(1, min(wlen, 256))
+            bs = self.inputs.get(f"otxnparam:{kn}")
+            if bs is None or len(bs) < n:
+                bs = self.fresh_bytes(f"otxnparam:{kn}", n)
+            self.store_bytes(p, wptr, bs[:n])
+            ret = z3.BitVec(f"otxn_param_ret:{kn}", 64)
+            self.inputs[f"otxn_param_ret:{kn}"] = ret
+            st.append(ret); return
         if name == "state":
             # state(write_ptr, write_len, kread_ptr, kread_len) -> bytes read
             klen = conc(st.pop()); kptr = conc(st.pop()); wlen = conc(st.pop()); wptr = conc(st.pop())
@@ -924,6 +940,28 @@ class Engine:
             else:
                 self.rollbacks.append((code, list(p.cons)))
             raise Terminal()
+        if name == "util_keylet":
+            # util_keylet(write_ptr, write_len, keylet_type, a,b,c,d,e,f) -> 34 (a 34-byte keylet) | <0.
+            # 9 args always. SOUND over-approximation: write a FRESH symbolic 34-byte keylet (an opaque
+            # ledger-object address). We never assert keylet determinism, and the foreign data it
+            # later addresses is already modeled symbolically — so safety invariants stay sound (at
+            # worst INCONCLUSIVE, never a false PROVEN). (Surfaced by external hooks using foreign state.)
+            vals = [st.pop() for _ in range(9)]      # [f,e,d,c,b,a,ktype,wlen,wptr]
+            wlen = conc(vals[7]); wptr = conc(vals[8])
+            bs = self.fresh_bytes("keylet", 34)
+            self.store_bytes(p, wptr, bs[:min(34, wlen)])
+            st.append(z3.BitVecVal(34, 64)); return
+        # Debug tracing — emits to the hook trace log ONLY; no effect on state / accept / emit /
+        # control flow, so modeling as a no-op (consume args, return 0) is SOUND (not a shortcut).
+        # Returning 0 (>=0 = success) means a hook that gates `if (trace(...) < 0) rollback` takes
+        # the success path, which is correct. Signatures are stable protocol: trace=5 args, the
+        # trace_num/float/slot variants=3. (Surfaced by external hooks that use TRACESTR/TRACEVAR.)
+        if name == "trace":
+            for _ in range(5): st.pop()
+            st.append(z3.BitVecVal(0, 64)); return
+        if name in ("trace_num", "trace_float", "trace_slot"):
+            for _ in range(3): st.pop()
+            st.append(z3.BitVecVal(0, 64)); return
         raise NotImplementedError(f"host fn {name} not modeled")
 
     def _call_local(self, local_idx, p):
