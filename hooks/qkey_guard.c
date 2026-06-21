@@ -30,6 +30,19 @@
  * so a single-signed tx always carries a valid 33-byte SigningPubKey and a
  * multi-signed tx carries an empty one — the length != 33 branch is exactly
  * the multi-sign path, not a forgeable bypass.
+ *
+ * Scope / audit caveats (must ride on any certificate):
+ *   - This is master-key DISUSE, not master-key COMPROMISE defense. The
+ *     management allowlist (SetRegularKey/SignerListSet/SetHook) is itself
+ *     master-signable, so a holder of the master key can still rotate keys or
+ *     remove this hook. The guard reduces routine master-key exposure (HNDL);
+ *     it does not stop an already-compromised master key.
+ *   - Enforcement assumes the SetHook HookOn mask fires this hook on every
+ *     non-management tx type. A HookOn that skips a type = no enforcement there;
+ *     verify HookOn at deploy time.
+ *   - MPK is owner-asserted at install. No host fn derives an AccountID from a
+ *     public key on-chain (RIPEMD160 is not exposed), so a wrong MPK silently
+ *     disables protection. MPK must be exactly the 33-byte master public key.
  */
 
 #define tt_SET_REGULAR_KEY 5

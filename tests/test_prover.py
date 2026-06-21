@@ -506,6 +506,7 @@ def test_master_disuse_safety():
     # OR SigningPubKey!=MPK. No ordinary outgoing tx is signed by the unrotatable master key.
     assert prove_master_disuse.main(os.path.join(H, "qkey_guard.wasm")) == 0          # master-disuse -> PROVEN
     assert prove_master_disuse.main(os.path.join(H, "qkey_guard_unsafe.wasm")) == 2   # accepts master-signed -> CEX
+    assert prove_master_disuse.main(os.path.join(H, "qkey_guard_hole.wasm")) == 2     # early bypass (payment allowlisted) -> CEX (vacuity fails toward CEX, not false-PROVEN)
     assert prove_master_disuse.main(os.path.join(H, "agent_guardrail.wasm")) == 1     # doesn't read signing key -> N/A
 
 

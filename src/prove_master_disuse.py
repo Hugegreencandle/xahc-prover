@@ -21,6 +21,15 @@ Engine inputs used: origin (sfAccount), hookacc (hook_account), otxn_type,
 SigningPubKey bytes + length (otxn_field 0x70003), and param MPK (hook_param).
 Fail-closed: solver `unknown` / unsupported opcode / hit unroll bound => INCONCLUSIVE.
 
+Audit scope (rides on any cert — see hooks/qkey_guard.c):
+  - Certifies the property only over the BYTE-WIDTH the hook actually compares
+    (is_master uses min(len(spk),len(mpk))). For full strength the hook must read
+    a 33-byte MPK and compare all 33 bytes (qkey_guard.c does). A shorter compare
+    over-rejects (still safe — fails toward COUNTEREXAMPLE, never false-PROVEN).
+  - Master-key DISUSE, not compromise defense: management types {5,12,22} are an
+    intentional, master-signable escape hatch (brick-safety), out of scope here.
+  - Assumes the hook fires (HookOn) and that MPK is genuinely the master pubkey.
+
 Usage: python prove_master_disuse.py <hook.wasm>
 """
 import sys
