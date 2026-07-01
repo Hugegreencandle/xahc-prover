@@ -457,6 +457,61 @@ Xahau via Hooks.
 - SDKs: Evernode SDK / HotPocket SDK / `hpdevkit` / `evdevkit` / All-in-One kit.
 - Hosts register on the **XRPL Hooks v3 testnet** for Evernode testnet.
 
+## 17. XRPL Lending Protocol (XLS-66d) — Loan lifecycle, impair vs default
+
+**XRPL-native (rippled), NOT a Xahau Hook.** Included here because Ward and cross-ledger
+credit proofs depend on it. Source-verified against **`XRPLF/rippled @ ecf7f805c9`** (the merged
+`featureLendingProtocol` amendment — the Devnet build family). Verified 2026-07-01.
+
+**Objects & where fields live**
+- `Loan` (`ltLOAN` 0x0089) — carries **`sfTotalValueOutstanding` (TVO)**, `sfPrincipalOutstanding`,
+  `sfManagementFeeOutstanding`, `sfPaymentRemaining`, `sfNextPaymentDueDate`.
+- `LoanBroker` — `sfDebtTotal`, `sfCoverAvailable` (first-loss capital).
+- `Vault` — `sfAssetsTotal`, `sfAssetsAvailable`, `sfLossUnrealized`.
+- TVO is a **per-Loan** field, not a broker/vault aggregate.
+
+**Flags**
+- Tx flags (`TxFlags.h`, on `LoanManage`, mutually exclusive, preflight-enforced):
+  `tfLoanDefault=0x10000`, `tfLoanImpair=0x20000`, `tfLoanUnimpair=0x40000`.
+- Ledger flags (`LedgerFormats.h`): `lsfLoanDefault=0x10000`, `lsfLoanImpaired=0x20000`,
+  `lsfLoanOverpayment=0x40000`. Impaired+defaulted **coexist = 0x30000** (default only ADDS
+  `lsfLoanDefault`, never clears impaired — and reads the still-set impaired flag to decide
+  whether to reverse `sfLossUnrealized`).
+
+**Impair** (`tfLoanImpair` → `impairLoan`, `LoanManage.cpp:300-339`): sets `lsfLoanImpaired`,
+bumps vault `sfLossUnrealized`, moves `sfNextPaymentDueDate`. **Does NOT touch TVO** — the loan
+still has a live outstanding balance (curable via `tfLoanUnimpair`).
+
+**Default** (`tfLoanDefault` → `defaultLoan`, `LoanManage.cpp:148-297`):
+- Zeros the Loan — `loanSle->at(sfTotalValueOutstanding) = 0;` (**line 279**) plus
+  PrincipalOutstanding / ManagementFeeOutstanding / PaymentRemaining / NextPaymentDueDate. Sets
+  `lsfLoanDefault`.
+- TVO is declared **`SoeDefault`**, so assigning `0` routes through `makeFieldAbsent`
+  (`STObject.h:761-764`) and the serializer skips it (`STObject.cpp:917-920`). **Set-zero ==
+  the field is DELETED** → absent in `account_objects` / on the wire. (Full repayment via
+  `LoanPay` closes the loan the same absent-on-zero way.)
+- First-loss cover is drawn **atomically in the same tx**:
+  `defaultCovered = min( min(minimumCover × coverRateLiquidation, totalDefaultAmount), CoverAvailable )`;
+  broker `sfCoverAvailable -= defaultCovered` (line 272); `accountSend(broker → vault,
+  defaultCovered)` (lines 290-296); vault `sfAssetsAvailable += covered`, `sfAssetsTotal -=`
+  uncovered remainder (realized loss). `totalDefaultAmount = TVO − sfManagementFeeOutstanding`.
+
+**Gotchas (rules of thumb for consumers like Ward)**
+- **"TVO absent" ≠ defaulted.** Absence = *terminal* (defaulted OR fully repaid). Branch on the
+  FLAG: `lsfLoanDefault` set ⇒ defaulted; TVO absent + `lsfLoanDefault` not set ⇒ repaid/closed;
+  `lsfLoanImpaired` only (0x20000) ⇒ **still has a live TVO**.
+- **No settlement gap.** The write-off and the cover waterfall are one atomic `tfLoanDefault` tx —
+  you can't insert a step between default and cover-draw. The resolution "window" for an external
+  verifier is the **impaired window** (after impair, before default) while TVO is still live.
+- Cover draw can legitimately be **0** (broker has no `CoverAvailable` posted, or zero cover
+  params) → `CoverAvailable` unchanged on default, which can look like "cover not deducted."
+
+**Cites** (`XRPLF/rippled @ ecf7f805c9`): `src/libxrpl/tx/transactors/lending/LoanManage.cpp`
+(`defaultLoan` 148-297, `impairLoan` 300-339, TVO clear @279, dispatch `doApply` 390-434);
+`include/xrpl/protocol/LedgerFormats.h` (lsf flags); `include/xrpl/protocol/TxFlags.h` (tf flags);
+`include/xrpl/protocol/STObject.h:761-764` + `src/libxrpl/protocol/STObject.cpp:917-920`
+(SoeDefault → field-absent mechanism).
+
 ---
 
 ### Maintenance
