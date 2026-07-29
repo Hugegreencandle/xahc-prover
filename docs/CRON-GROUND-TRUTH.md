@@ -48,4 +48,4 @@ Design: account sets a recurring CronSet (D=period, R=N≤256, S=first), `asfTsh
 weak-TSH hook emits ONE capped Payment to the allowed payee + decrements remaining in ExtendedHookState.
 Invariants to PROVE (all already in the battery): `period-budget` (Σ over period ≤ cap), `conservation`
 (no over-emit), one-emit-per-fire / `nospend` (no double-pay), `dst-lock` (payee fixed), owner-only
-cancel (`authz`), and `cron` (≤K re-arm if extending beyond 256). Ship with `xahau-attest` cert.
+cancel (`authz`), and `cron` (≤K re-arm if extending beyond 256).

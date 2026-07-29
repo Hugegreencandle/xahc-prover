@@ -52,8 +52,6 @@ Four open-source tools, one workflow: **write → simulate one tx → prove all 
 | **prove all** | [xahc-prover](https://github.com/Hugegreencandle/xahc-prover) | prove an invariant holds for every input in scope — or return the counterexample |
 | **watch live** | [xahc-watch](docs/XAHC-WATCH.md) *(in this repo, `src/watch/`)* | bind a proof to a deployed hook and continuously attest the binding holds + live txns obey the proven verdict |
 
-📋 **[OWASP Smart Contract Top 10 (2025) coverage →](docs/SC-TOP-10-COVERAGE.md)** — which of
-the SC Top 10 xahc-prover proves, mapped to invariants, with honest out-of-domain notes.
 
 ## Demo
 
