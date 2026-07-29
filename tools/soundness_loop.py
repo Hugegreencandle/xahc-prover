@@ -17,9 +17,9 @@ It also tracks (non-fatal, for the confusion matrix):
     got LESS capable — worth watching),
   - INCONCLUSIVE drift on known-unsafe cases (2 -> 3): not unsound, but a detection regression.
 
-Run:  cd ~/Desktop/xahc-prover && ./.venv/bin/python tools/soundness_loop.py
+Run:  cd <xahc-prover> && ./.venv/bin/python tools/soundness_loop.py
 Exit: 0 = no false PROVEN (sound) · 2 = FALSE PROVEN found (catastrophic) · 3 = harness/run error.
-Writes a dated report to HQ/06-Technical/Prover_Soundness_<date>.md (override dir via --report-dir).
+Writes a dated report to ./reports/Prover_Soundness_<date>.md (override dir via --report-dir).
 """
 import importlib
 import os
@@ -93,7 +93,7 @@ def run_case(driver: str, wasm: str, extra: str) -> int:
 
 
 def main():
-    report_dir = os.path.join(os.path.expanduser("~"), "Desktop", "Kairo Vault HQ", "06-Technical")
+    report_dir = os.environ.get("PROVER_REPORT_DIR", os.path.join(os.getcwd(), "reports"))
     if "--report-dir" in sys.argv:
         report_dir = sys.argv[sys.argv.index("--report-dir") + 1]
 

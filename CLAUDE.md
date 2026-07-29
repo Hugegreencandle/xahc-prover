@@ -80,7 +80,7 @@ python src/prove_guardrail.py hooks/agent_guardrail.wasm
 ```
 - Building `.c → .wasm` needs a **wasm32-capable clang**: Apple clang does NOT have it.
   Use brew LLVM: `export PATH="/opt/homebrew/opt/llvm/bin:$PATH"` and
-  `CC=/opt/homebrew/opt/llvm/bin/clang ~/Desktop/xahc/target/release/xahc build <f>.c -o <f>.wasm`.
+  `CC=/opt/homebrew/opt/llvm/bin/clang <xahc>/target/release/xahc build <f>.c -o <f>.wasm`.
 - Committed `.wasm` fixtures mean you usually DON'T need to rebuild to run the proofs/tests.
 
 ## Testnet validation (when proving against the real ledger)
